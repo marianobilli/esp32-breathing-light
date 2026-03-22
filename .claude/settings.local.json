@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pio test:*)",
+      "WebSearch",
+      "Bash(find /Users/mbilling/personal/github/marianobilli/esp32-oled-w-controls -maxdepth 2 -not -path */.pio/* -not -path */.vscode/*)"
+    ]
+  }
+}
