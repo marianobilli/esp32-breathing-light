@@ -3,41 +3,40 @@
 #include <U8g2lib.h>
 #include <driver/i2s.h>
 #include <math.h>
+#include <SPIFFS.h>
 #include "RotaryEncoder.h"
+#include "led_envelope.h"
 
 // ---------------------------------------------------------------------------
 // Pin definitions
 // ---------------------------------------------------------------------------
-static const uint8_t LED_PIN = 48;
-static const uint8_t LED_MAX_BRIGHT = 80;
+static const uint8_t LED_PWM_PIN = 1;
+static const uint8_t LED_PWM_CHANNEL = 0;
+static const uint32_t LED_PWM_FREQ = 25000;  // 25 kHz — above audio band to reduce audible noise
+static const uint8_t LED_PWM_BITS = 10;      // 0–1023 duty range (finer steps at low brightness)
+static const uint16_t LED_MAX_BRIGHT = 1023; // full 10-bit range
+static const uint16_t LED_MAX_STEP   = 30;   // max brightness change per 10 ms tick (slew limiter)
 
 // ---------------------------------------------------------------------------
-// I2S / MAX98357A pin definitions
+// I2S / PCM5102 pin definitions
 // ---------------------------------------------------------------------------
-static const uint8_t I2S_BCLK_PIN = 41;
-static const uint8_t I2S_WS_PIN = 42;
-static const uint8_t I2S_DOUT_PIN = 40;
-// I2S_SD_PIN (GPIO 35) is intentionally left floating — see hardware notes.
-// Datasheet requires ~2kΩ series resistor when VDD = VDDIO; without it,
-// direct GPIO drive at 3.3V can put the SD_MODE comparator in an undefined
-// state. Muting is handled by sending zero-amplitude I2S data instead.
+static const uint8_t I2S_BCLK_PIN = 2;  // BCK
+static const uint8_t I2S_WS_PIN = 41;   // LCK
+static const uint8_t I2S_DOUT_PIN = 42; // DIN
 static const uint32_t I2S_SAMPLE_RATE = 16000;
-static const float SINE_FREQ_MIN = 150.0f; // pitch at exhale bottom
-static const float SINE_FREQ_MAX = 300.0f; // pitch at inhale peak
-static const int16_t MAX_AMPLITUDE = 30000;
 
 // ---------------------------------------------------------------------------
 // Pin definitions
 // ---------------------------------------------------------------------------
 enum Pins : uint8_t
 {
-    PIN_SDA = 5,
-    PIN_SCL = 3,
-    PIN_CON = 4,  // Confirm button
-    PIN_PSH = 8,  // Rotary encoder push button
-    PIN_TRA = 9,  // Encoder A (CLK)
-    PIN_TRB = 18, // Encoder B (DT)
-    PIN_BAK = 17, // Back button
+    PIN_SDA = 14,
+    PIN_SCL = 13,
+    PIN_CON = 21, // Confirm button
+    PIN_PSH = 4,  // Rotary encoder push button
+    PIN_TRA = 5,  // Encoder A (CLK)
+    PIN_TRB = 6,  // Encoder B (DT)
+    PIN_BAK = 38, // Back button
 };
 
 // ---------------------------------------------------------------------------
@@ -91,10 +90,6 @@ void updateButton(Button &btn)
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
-enum Screen : uint8_t
-{
-    SCREEN_MAIN = 0
-};
 enum BreathPhase : uint8_t
 {
     BREATH_IN,
@@ -104,12 +99,20 @@ enum BreathPhase : uint8_t
 static const uint32_t BREATH_IN_MS = 4000;
 static const uint32_t BREATH_OUT_MS = 6000;
 
-Screen currentScreen = SCREEN_MAIN;
-bool breatheEnabled = true;
-bool soundEnabled = true;
-BreathPhase breathPhase = BREATH_IN;
-uint32_t breathStartMs = 0;
-uint8_t soundVolume = 50; // 0–100 %
+volatile bool breatheEnabled = true;
+volatile bool soundEnabled = true;
+volatile BreathPhase breathPhase = BREATH_IN;
+volatile uint32_t breathStartMs = 0;
+volatile uint8_t soundVolume = 100;     // 0–100 %
+volatile uint8_t ledMaxIntensity = 100; // 0–100 %
+
+enum MenuState : uint8_t
+{
+    BROWSE,
+    EDIT
+};
+MenuState menuState = BROWSE;
+uint8_t selectedItem = 0; // 0 = Vol, 1 = LED, 2 = ON/OFF
 
 // ---------------------------------------------------------------------------
 // Breathing logic
@@ -129,35 +132,12 @@ void updateBreath()
     }
 }
 
-uint32_t breathSecondsRemaining()
-{
-    uint32_t duration = (breathPhase == BREATH_IN) ? BREATH_IN_MS : BREATH_OUT_MS;
-    uint32_t elapsed = millis() - breathStartMs;
-    if (elapsed >= duration)
-        return 0;
-    uint32_t msLeft = duration - elapsed;
-    return (msLeft + 999) / 1000; // ceiling
-}
-
-// Piecewise linear easing: first 1/3 of time covers 2/3 of the range (faster),
-// remaining 2/3 of time covers the last 1/3 (slower).
-static float easeBreath(float t)
-{
-    if (t < 1.0f / 3.0f)
-    {
-        return t * 2.0f;
-    }
-    else
-    {
-        return 2.0f / 3.0f + (t - 1.0f / 3.0f) * 0.5f;
-    }
-}
-
 void updateLed()
 {
+    static uint16_t lastB = 0;
     if (!breatheEnabled)
     {
-        neopixelWrite(LED_PIN, 0, 0, 0);
+        if (lastB != 0) { ledcWrite(LED_PWM_CHANNEL, 0); lastB = 0; }
         return;
     }
 
@@ -166,12 +146,31 @@ void updateLed()
     if (elapsed > duration)
         elapsed = duration;
 
-    float t = easeBreath((float)elapsed / duration);
-    uint8_t b = (breathPhase == BREATH_IN)
-                    ? (uint8_t)(t * LED_MAX_BRIGHT)
-                    : (uint8_t)((1.0f - t) * LED_MAX_BRIGHT);
+    // Use pre-computed RMS envelope derived from the actual audio files.
+    // Linear interpolation between adjacent 50 ms envelope samples.
+    const uint8_t *env = (breathPhase == BREATH_IN) ? kLedEnvelopeIn : kLedEnvelopeOut;
+    const uint8_t envN = (breathPhase == BREATH_IN) ? 80 : 120;
 
-    neopixelWrite(LED_PIN, b, b, b);
+    float pos = (float)elapsed / duration * (envN - 1);
+    uint8_t lo = (uint8_t)pos;
+    uint8_t hi = (lo + 1 < envN) ? lo + 1 : lo;
+    float frac = pos - lo;
+    float val = env[lo] + frac * (env[hi] - env[lo]);
+
+    // kLedEnvelopeIn  is ascending  0→255: norm goes 0→1, gamma 2.2 for perceptual linearity.
+    // kLedEnvelopeOut is descending 255→0: norm goes 1→0, used directly (no inversion, no
+    // gamma) so the LED remains visibly lit throughout the exhalation and reaches exactly
+    // zero at the end of the phase.
+    float norm = val / 255.0f;
+    float peak = LED_MAX_BRIGHT * (ledMaxIntensity / 100.0f);
+    uint16_t b = (breathPhase == BREATH_IN)
+                     ? (uint16_t)(powf(norm, 2.2f) * peak)
+                     : (uint16_t)(norm * peak);
+    if (b != lastB)
+    {
+        ledcWrite(LED_PWM_CHANNEL, b);
+        lastB = b;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +185,8 @@ void initI2S()
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 64,
+        .dma_buf_count = 16,
+        .dma_buf_len = 128,
         .use_apll = false,
         .tx_desc_auto_clear = true,
     };
@@ -202,104 +201,175 @@ void initI2S()
     i2s_set_pin(I2S_NUM_0, &pins);
 }
 
+// ---------------------------------------------------------------------------
+// WAV file player
+//
+// Expected format: RIFF PCM, 16-bit signed, mono, 16000 Hz.
+// The player parses the WAV chunk headers to find the 'data' chunk, so
+// files with non-standard header sizes (e.g. LIST/INFO chunks) are handled.
+//
+// Playback stops early if breathPhase changes or breatheEnabled goes false,
+// so the next phase's audio can start immediately.
+// ---------------------------------------------------------------------------
+// Opens a WAV from SPIFFS. Returns an invalid (falsy) File on failure.
+static File openWavFile(const char *path)
+{
+    File f = SPIFFS.open(path);
+    if (!f)
+        Serial.printf("WAV not found in SPIFFS: %s\n", path);
+    return f;
+}
+
+// Scans RIFF chunks starting after the WAVE FourCC to find the 'data' chunk.
+// Returns the file offset of the first audio sample, or 0 on failure.
+static uint32_t findWavDataOffset(File &f)
+{
+    uint8_t buf[8];
+    f.seek(12); // skip "RIFF", file-size, "WAVE"
+    while (f.available() >= 8)
+    {
+        if (f.read(buf, 8) != 8)
+            break;
+        uint32_t chunkSize = buf[4] | ((uint32_t)buf[5] << 8) |
+                             ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
+        if (memcmp(buf, "data", 4) == 0)
+            return f.position();
+        // RIFF chunks are word-aligned; skip this chunk
+        f.seek(f.position() + chunkSize + (chunkSize & 1));
+    }
+    return 0;
+}
+
+// Streams WAV samples to I2S with volume scaling. Exits early if the breath
+// phase changes so the new phase's audio can start without delay.
+static void playWavFile(const char *path, BreathPhase triggerPhase)
+{
+    File f = openWavFile(path);
+    if (!f)
+        return;
+
+    uint32_t dataOffset = findWavDataOffset(f);
+    if (dataOffset == 0)
+    {
+        Serial.printf("Bad WAV header: %s\n", path);
+        f.close();
+        return;
+    }
+    f.seek(dataOffset);
+
+    // Static buffers: avoids putting ~3 KB on the FreeRTOS task stack.
+    // Safe because playWavFile is only ever called from soundTask (no reentrancy).
+    static int16_t mono[512];
+    static int16_t stereo[512 * 2];
+
+    while (f.available() && breathPhase == triggerPhase && breatheEnabled && soundEnabled)
+    {
+        int bytesRead = f.read((uint8_t *)mono, sizeof(mono));
+        if (bytesRead <= 0)
+            break;
+
+        int samplesRead = bytesRead / 2;
+        float volLinear = soundVolume / 100.0f;
+        float volExp = volLinear * volLinear; // square for perceptual loudness
+
+        for (int i = 0; i < samplesRead; i++)
+        {
+            int16_t s = (int16_t)(mono[i] * volExp);
+            stereo[i * 2] = s;
+            stereo[i * 2 + 1] = s;
+        }
+        size_t written;
+        i2s_write(I2S_NUM_0, stereo, samplesRead * 4, &written, portMAX_DELAY);
+    }
+    f.close();
+}
+
+// Sends one buffer of silence to keep the I2S clock alive.
+static void writeSilence()
+{
+    static int16_t silBuf[128 * 2]; // zeroed by BSS init; never written
+    size_t written;
+    i2s_write(I2S_NUM_0, silBuf, sizeof(silBuf), &written, portMAX_DELAY);
+}
+
+// ---------------------------------------------------------------------------
+// Sound task
+//
+// Detects breath-phase transitions and plays the matching WAV file.
+// Between clips (after the WAV ends but before the next phase starts) it
+// streams silence so the I2S peripheral keeps its clock running.
+// ---------------------------------------------------------------------------
 void soundTask(void * /*param*/)
 {
-    const int BUF_SAMPLES = 64;
-    int16_t buf[BUF_SAMPLES * 2]; // interleaved L/R
-    float phaseAccum = 0.0f;
+    int8_t lastPhase = -1; // -1 = uninitialized / not yet started
 
     while (true)
     {
-        float amplitude = 0.0f;
-        float freq = SINE_FREQ_MIN;
-
-        if (soundEnabled && breatheEnabled)
+        if (!breatheEnabled || !soundEnabled)
         {
-            uint32_t duration = (breathPhase == BREATH_IN) ? BREATH_IN_MS : BREATH_OUT_MS;
-            uint32_t elapsed = millis() - breathStartMs;
-            if (elapsed > duration)
-                elapsed = duration;
-            float t = easeBreath((float)elapsed / duration);
-            float env = (breathPhase == BREATH_IN) ? t : (1.0f - t);
-            float volLinear = soundVolume / 100.0f;
-            float volExp = volLinear * volLinear; // square for perceptual loudness
-            amplitude = env * MAX_AMPLITUDE * volExp;
-            freq = SINE_FREQ_MIN + env * (SINE_FREQ_MAX - SINE_FREQ_MIN);
-            static uint32_t lastLogMs = 0;
-            if (millis() - lastLogMs > 1000)
-            {
-                lastLogMs = millis();
-                Serial.printf("vol=%u%% amp=%.1f freq=%.0f\n", soundVolume, amplitude, freq);
-            }
+            lastPhase = -1;
+            writeSilence();
+            continue;
         }
 
-        float phaseIncrement = 2.0f * M_PI * freq / I2S_SAMPLE_RATE;
-        for (int i = 0; i < BUF_SAMPLES; i++)
-        {
-            int16_t sample = (int16_t)(sinf(phaseAccum) * amplitude);
-            buf[i * 2] = sample;     // L
-            buf[i * 2 + 1] = sample; // R
-            phaseAccum += phaseIncrement;
-        }
-        // keep phaseAccum in [0, 2π) to avoid float precision drift
-        phaseAccum = fmodf(phaseAccum, 2.0f * M_PI);
+        int8_t currentPhase = (int8_t)breathPhase;
 
-        size_t written;
-        i2s_write(I2S_NUM_0, buf, sizeof(buf), &written, portMAX_DELAY);
+        if (currentPhase != lastPhase)
+        {
+            lastPhase = currentPhase;
+            const char *filename = (breathPhase == BREATH_IN)
+                                       ? "/breath_in.wav"
+                                       : "/breath_out.wav";
+            playWavFile(filename, breathPhase);
+            // Fall through to silence loop after WAV ends
+        }
+        else
+        {
+            writeSilence();
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Display
 // ---------------------------------------------------------------------------
-static const uint32_t DISPLAY_TICK_MS = 100;
-
-void drawSplash()
-{
-    u8g2.clearBuffer();
-
-    // "Moni" — large serif font, centered
-    u8g2.setFont(u8g2_font_osb26_tf);
-    const char *line1 = "Gary";
-    u8g2.drawStr((128 - u8g2.getStrWidth(line1)) / 2, 30, line1);
-
-    // "Art" — same font, centered below
-    const char *line2 = "Moni";
-    u8g2.drawStr((128 - u8g2.getStrWidth(line2)) / 2, 58, line2);
-
-    u8g2.sendBuffer();
-}
+static const uint32_t DISPLAY_TICK_MS = 500;
 
 void drawScreen()
 {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
 
-    u8g2.drawStr(0, 12, "=== Moni ===");
+    // Menu rows — ">" cursor in BROWSE, brackets around value in EDIT
+    char rowVol[24], rowLed[24], rowOnOff[24];
 
-    if (breatheEnabled)
+    if (menuState == BROWSE)
     {
-        char buf[32];
-        uint32_t secs = breathSecondsRemaining();
-        if (breathPhase == BREATH_IN)
-        {
-            snprintf(buf, sizeof(buf), "Breathing in... %us", (unsigned)secs);
-        }
-        else
-        {
-            snprintf(buf, sizeof(buf), "Breathing out... %us", (unsigned)secs);
-        }
-        u8g2.drawStr(0, 30, buf);
+        snprintf(rowVol, sizeof(rowVol), "%cVol: %u%%",
+                 selectedItem == 0 ? '>' : ' ', (unsigned)soundVolume);
+        snprintf(rowLed, sizeof(rowLed), "%cLED: %u%%",
+                 selectedItem == 1 ? '>' : ' ', (unsigned)ledMaxIntensity);
+        snprintf(rowOnOff, sizeof(rowOnOff), "%cON/OFF: %s",
+                 selectedItem == 2 ? '>' : ' ', breatheEnabled ? "ON" : "OFF");
     }
     else
     {
-        u8g2.drawStr(0, 30, "Breathing disabled");
+        snprintf(rowVol, sizeof(rowVol), "%cVol: %s%u%%%s",
+                 selectedItem == 0 ? '>' : ' ',
+                 selectedItem == 0 ? "[" : "", (unsigned)soundVolume,
+                 selectedItem == 0 ? "]" : "");
+        snprintf(rowLed, sizeof(rowLed), "%cLED: %s%u%%%s",
+                 selectedItem == 1 ? '>' : ' ',
+                 selectedItem == 1 ? "[" : "", (unsigned)ledMaxIntensity,
+                 selectedItem == 1 ? "]" : "");
+        snprintf(rowOnOff, sizeof(rowOnOff), "%cON/OFF: %s",
+                 selectedItem == 2 ? '>' : ' ', breatheEnabled ? "ON" : "OFF");
     }
+    u8g2.drawStr(0, 14, rowVol);
+    u8g2.drawStr(0, 28, rowLed);
+    u8g2.drawStr(0, 42, rowOnOff);
 
-    char volBuf[24];
-    snprintf(volBuf, sizeof(volBuf), "Vol: %u%%", (unsigned)soundVolume);
-    u8g2.drawStr(0, 48, volBuf);
-    u8g2.drawStr(0, 62, "[CON to toggle breathing]");
+    u8g2.drawStr(0, 64, menuState == BROWSE ? "[PUSH=ok BACK=exit]" : "[BAK=done]");
 
     u8g2.sendBuffer();
 }
@@ -321,24 +391,47 @@ void setup()
     Serial.begin(115200);
 
     Wire.begin(PIN_SDA, PIN_SCL);
+
+    // I2C scanner — remove after display confirmed working
+    Serial.println("Scanning I2C bus...");
+    for (uint8_t addr = 1; addr < 127; addr++)
+    {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0)
+            Serial.printf("  I2C device at 0x%02X\n", addr);
+    }
+    Serial.println("Scan done.");
+
+    Serial.println("u8g2 begin...");
     u8g2.begin();
+    Serial.println("u8g2 ok.");
 
-    drawSplash();
-    delay(3000);
-
-    // Initialize breathing timer since it's enabled by default
     breathPhase = BREATH_IN;
     breathStartMs = millis();
 
+    Serial.println("encoder begin...");
     encoder.begin(PIN_TRA, PIN_TRB);
+    Serial.println("encoder ok.");
 
+    Serial.println("buttons begin...");
     initButton(btnPsh, PIN_PSH);
     initButton(btnBak, PIN_BAK);
     initButton(btnCon, PIN_CON);
+    Serial.println("buttons ok.");
+
+    ledcSetup(LED_PWM_CHANNEL, LED_PWM_FREQ, LED_PWM_BITS);
+    ledcAttachPin(LED_PWM_PIN, LED_PWM_CHANNEL);
+    ledcWrite(LED_PWM_CHANNEL, 0); // start off
+
+    // SPIFFS — format on first boot if needed
+    if (SPIFFS.begin(true))
+        Serial.println("SPIFFS mounted.");
+    else
+        Serial.println("SPIFFS mount failed.");
 
     initI2S();
     // Audio task on core 0 with high priority to reduce interruptions
-    xTaskCreatePinnedToCore(soundTask, "sound", 4096, NULL, 10, NULL, 0);
+    xTaskCreatePinnedToCore(soundTask, "sound", 8192, NULL, 10, NULL, 0);
 
     drawScreen();
 
@@ -352,9 +445,32 @@ void loop()
 
     if (delta != 0)
     {
-        // delta is ±1 per detent (physical click); apply fixed 5% step.
-        int newVol = (int)soundVolume + (delta * 5);
-        soundVolume = (newVol < 0) ? 0 : (newVol > 100) ? 100 : newVol;
+        if (menuState == BROWSE)
+        {
+            // Navigate between items (wrap 0–2)
+            int8_t next = (int8_t)selectedItem + (delta > 0 ? 1 : -1);
+            if (next < 0)
+                next = 2;
+            else if (next > 2)
+                next = 0;
+            selectedItem = (uint8_t)next;
+        }
+        else
+        {
+            // Edit selected value in 5% steps (item 2 is ON/OFF, not editable by encoder)
+            if (selectedItem == 0)
+            {
+                int v = (int)soundVolume + (delta * 5);
+                soundVolume = (v < 0) ? 0 : (v > 100) ? 100
+                                                      : (uint8_t)v;
+            }
+            else if (selectedItem == 1)
+            {
+                int v = (int)ledMaxIntensity + (delta * 5);
+                ledMaxIntensity = (v < 0) ? 0 : (v > 100) ? 100
+                                                          : (uint8_t)v;
+            }
+        }
     }
 
     // --- Buttons ---
@@ -365,25 +481,34 @@ void loop()
     if (btnPsh.pressed)
     {
         btnPsh.pressed = false;
-        // PSH button not used
+        if (menuState == BROWSE)
+        {
+            if (selectedItem == 2)
+            {
+                // Toggle ON/OFF
+                breatheEnabled = !breatheEnabled;
+                if (breatheEnabled)
+                {
+                    breathPhase = BREATH_IN;
+                    breathStartMs = millis();
+                }
+            }
+            else
+            {
+                menuState = EDIT;
+            }
+        }
     }
 
     if (btnBak.pressed)
     {
         btnBak.pressed = false;
-        // BAK button not used (only one screen)
+        menuState = BROWSE;
     }
 
     if (btnCon.pressed)
     {
-        btnCon.pressed = false;
-        // Toggle breathing
-        breatheEnabled = !breatheEnabled;
-        if (breatheEnabled)
-        {
-            breathPhase = BREATH_IN;
-            breathStartMs = millis();
-        }
+        btnCon.pressed = false; /* unused */
     }
 
     // --- Breathing ---
