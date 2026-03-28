@@ -179,6 +179,19 @@ void updateLed()
 }
 
 // ---------------------------------------------------------------------------
+// LED task — fixed 10 ms cadence on Core 1, decoupled from display I2C blocking
+// ---------------------------------------------------------------------------
+void ledTask(void * /*param*/)
+{
+    TickType_t lastWake = xTaskGetTickCount();
+    while (true)
+    {
+        updateLed();
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // I2S / sound
 // ---------------------------------------------------------------------------
 void initI2S()
@@ -438,6 +451,9 @@ void setup()
     // Audio task on core 0 with high priority to reduce interruptions
     xTaskCreatePinnedToCore(soundTask, "sound", 8192, NULL, 10, NULL, 0);
 
+    // LED task on core 1 at priority 5 — runs every 10 ms regardless of display blocking
+    xTaskCreatePinnedToCore(ledTask, "led", 2048, NULL, 5, NULL, 1);
+
     drawScreen();
 
     Serial.println("System ready.");
@@ -518,7 +534,6 @@ void loop()
 
     // --- Breathing ---
     updateBreath();
-    updateLed();
 
     // --- Display tick ---
     static uint32_t lastDrawMs = 0;
