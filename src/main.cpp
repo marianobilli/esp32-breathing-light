@@ -134,22 +134,29 @@ void updateBreath()
 
 void updateLed()
 {
+    // Snapshot volatile shared state once — prevents mixed-phase reads if updateBreath()
+    // preempts this task between two volatile reads within a single call.
+    const bool        enabled = breatheEnabled;
+    const BreathPhase phase   = breathPhase;
+    const uint32_t    startMs = breathStartMs;
+    const uint8_t     maxInt  = ledMaxIntensity;
+
     static uint16_t lastB = 0; // 0xFFFF would cause a spurious spike on first tick with the slew clamp
-    if (!breatheEnabled)
+    if (!enabled)
     {
         if (lastB != 0) { ledcWrite(LED_PWM_CHANNEL, 0); lastB = 0; }
         return;
     }
 
-    uint32_t duration = (breathPhase == BREATH_IN) ? BREATH_IN_MS : BREATH_OUT_MS;
-    uint32_t elapsed = millis() - breathStartMs;
+    uint32_t duration = (phase == BREATH_IN) ? BREATH_IN_MS : BREATH_OUT_MS;
+    uint32_t elapsed = millis() - startMs;
     if (elapsed > duration)
         elapsed = duration;
 
     // Use pre-computed RMS envelope derived from the actual audio files.
     // Linear interpolation between adjacent 50 ms envelope samples.
-    const uint8_t *env = (breathPhase == BREATH_IN) ? kLedEnvelopeIn : kLedEnvelopeOut;
-    const uint8_t envN = (breathPhase == BREATH_IN) ? 80 : 120;
+    const uint8_t *env = (phase == BREATH_IN) ? kLedEnvelopeIn : kLedEnvelopeOut;
+    const uint8_t envN = (phase == BREATH_IN) ? 80 : 120;
 
     float pos = (float)elapsed / duration * (envN - 1);
     uint8_t lo = (uint8_t)pos;
@@ -162,8 +169,8 @@ void updateLed()
     // gamma) so the LED remains visibly lit throughout the exhalation and reaches exactly
     // zero at the end of the phase.
     float norm = val / 255.0f;
-    float peak = LED_MAX_BRIGHT * (ledMaxIntensity / 100.0f);
-    uint16_t b = (breathPhase == BREATH_IN)
+    float peak = LED_MAX_BRIGHT * (maxInt / 100.0f);
+    uint16_t b = (phase == BREATH_IN)
                      ? (uint16_t)(powf(norm, 2.2f) * peak)
                      : (uint16_t)(norm * peak);
 
