@@ -134,7 +134,7 @@ void updateBreath()
 
 void updateLed()
 {
-    static uint16_t lastB = 0;
+    static uint16_t lastB = 0; // 0xFFFF would cause a spurious spike on first tick with the slew clamp
     if (!breatheEnabled)
     {
         if (lastB != 0) { ledcWrite(LED_PWM_CHANNEL, 0); lastB = 0; }
@@ -166,6 +166,11 @@ void updateLed()
     uint16_t b = (breathPhase == BREATH_IN)
                      ? (uint16_t)(powf(norm, 2.2f) * peak)
                      : (uint16_t)(norm * peak);
+
+    // Slew rate clamp — prevents large jumps even if timing drifts briefly.
+    if (b > lastB + LED_MAX_STEP)      b = lastB + LED_MAX_STEP;
+    else if (b + LED_MAX_STEP < lastB) b = lastB - LED_MAX_STEP;
+
     if (b != lastB)
     {
         ledcWrite(LED_PWM_CHANNEL, b);
