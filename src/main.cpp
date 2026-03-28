@@ -193,6 +193,7 @@ void ledTask(void * /*param*/)
     TickType_t lastWake = xTaskGetTickCount();
     while (true)
     {
+        updateBreath();
         updateLed();
         vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(10));
     }
@@ -538,9 +539,6 @@ void loop()
     {
         btnCon.pressed = false; /* unused */
     }
-
-    // --- Breathing ---
-    updateBreath();
 
     // --- Display tick ---
     static uint32_t lastDrawMs = 0;
