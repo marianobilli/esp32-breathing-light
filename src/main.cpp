@@ -15,7 +15,8 @@ static const uint8_t LED_PWM_CHANNEL = 0;
 static const uint32_t LED_PWM_FREQ = 25000;  // 25 kHz — above audio band to reduce audible noise
 static const uint8_t LED_PWM_BITS = 10;      // 0–1023 duty range (finer steps at low brightness)
 static const uint16_t LED_MAX_BRIGHT = 1023; // full 10-bit range
-static const uint16_t LED_MAX_STEP   = 30;   // max brightness change per 10 ms tick (slew limiter)
+static const uint16_t LED_MAX_STEP = 30;     // max brightness change per 10 ms tick (slew limiter)
+static const uint16_t LED_MIN_DUTY = 2;      // minimum non-zero duty (avoids MOSFET linear region flicker)
 
 // ---------------------------------------------------------------------------
 // I2S / PCM5102 pin definitions
@@ -33,9 +34,9 @@ enum Pins : uint8_t
     PIN_SDA = 14,
     PIN_SCL = 13,
     PIN_CON = 21, // Confirm button
-    PIN_PSH = 4,  // Rotary encoder push button
+    PIN_PSH = 6,  // Rotary encoder push button
     PIN_TRA = 5,  // Encoder A (CLK)
-    PIN_TRB = 6,  // Encoder B (DT)
+    PIN_TRB = 4,  // Encoder B (DT)
     PIN_BAK = 38, // Back button
 };
 
@@ -127,8 +128,10 @@ void updateBreath()
 
     if (elapsed >= duration)
     {
-        breathPhase = (breathPhase == BREATH_IN) ? BREATH_OUT : BREATH_IN;
-        breathStartMs = millis();
+        BreathPhase next = (breathPhase == BREATH_IN) ? BREATH_OUT : BREATH_IN;
+        breathStartMs = millis(); // timestamp FIRST — soundTask reads phase as trigger
+        __sync_synchronize();     // full memory barrier: Core 0 sees startMs before phase
+        breathPhase = next;       // phase SECOND — this is what readers poll
     }
 }
 
@@ -136,15 +139,19 @@ void updateLed()
 {
     // Snapshot volatile shared state once — prevents mixed-phase reads if updateBreath()
     // preempts this task between two volatile reads within a single call.
-    const bool        enabled = breatheEnabled;
-    const BreathPhase phase   = breathPhase;
-    const uint32_t    startMs = breathStartMs;
-    const uint8_t     maxInt  = ledMaxIntensity;
+    const bool enabled = breatheEnabled;
+    const BreathPhase phase = breathPhase;
+    const uint32_t startMs = breathStartMs;
+    const uint8_t maxInt = ledMaxIntensity;
 
     static uint16_t lastB = 0; // 0xFFFF would cause a spurious spike on first tick with the slew clamp
     if (!enabled)
     {
-        if (lastB != 0) { ledcWrite(LED_PWM_CHANNEL, 0); lastB = 0; }
+        if (lastB != 0)
+        {
+            ledcWrite(LED_PWM_CHANNEL, 0);
+            lastB = 0;
+        }
         return;
     }
 
@@ -174,9 +181,21 @@ void updateLed()
                      ? (uint16_t)(powf(norm, 2.2f) * peak)
                      : (uint16_t)(norm * peak);
 
-    // Slew rate clamp — prevents large jumps even if timing drifts briefly.
-    if (b > lastB + LED_MAX_STEP)      b = lastB + LED_MAX_STEP;
-    else if (b + LED_MAX_STEP < lastB) b = lastB - LED_MAX_STEP;
+    // Floor: avoid sub-threshold duty where MOSFET operates in linear region
+    if (b > 0 && b < LED_MIN_DUTY)
+        b = LED_MIN_DUTY;
+
+    // Adaptive slew rate: scale step size down at low brightness to avoid
+    // visible jumps (30/50 = 60% is jarring; 3/50 = 6% is smooth).
+    uint16_t maxStep = (lastB > 100) ? LED_MAX_STEP
+                                     : (uint16_t)((lastB / 5) + 3);
+    if (maxStep < 3)
+        maxStep = 3;
+
+    if (b > lastB + maxStep)
+        b = lastB + maxStep;
+    else if (b + maxStep < lastB)
+        b = lastB - maxStep;
 
     if (b != lastB)
     {
@@ -211,7 +230,7 @@ void initI2S()
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 16,
+        .dma_buf_count = 32,
         .dma_buf_len = 128,
         .use_apll = false,
         .tx_desc_auto_clear = true,
@@ -228,23 +247,21 @@ void initI2S()
 }
 
 // ---------------------------------------------------------------------------
-// WAV file player
+// WAV file player — PSRAM-backed for glitch-free playback
 //
 // Expected format: RIFF PCM, 16-bit signed, mono, 16000 Hz.
-// The player parses the WAV chunk headers to find the 'data' chunk, so
-// files with non-standard header sizes (e.g. LIST/INFO chunks) are handled.
+// WAV files are pre-loaded into PSRAM at boot to eliminate SPIFFS blocking
+// during real-time audio streaming.
 //
 // Playback stops early if breathPhase changes or breatheEnabled goes false,
-// so the next phase's audio can start immediately.
+// with a short fade-out to prevent audible clicks.
 // ---------------------------------------------------------------------------
-// Opens a WAV from SPIFFS. Returns an invalid (falsy) File on failure.
-static File openWavFile(const char *path)
-{
-    File f = SPIFFS.open(path);
-    if (!f)
-        Serial.printf("WAV not found in SPIFFS: %s\n", path);
-    return f;
-}
+
+// Pre-loaded WAV audio data (PCM samples in PSRAM)
+static int16_t *wavDataIn = nullptr;
+static uint32_t wavLenIn = 0; // sample count
+static int16_t *wavDataOut = nullptr;
+static uint32_t wavLenOut = 0; // sample count
 
 // Scans RIFF chunks starting after the WAVE FourCC to find the 'data' chunk.
 // Returns the file offset of the first audio sample, or 0 on failure.
@@ -260,54 +277,105 @@ static uint32_t findWavDataOffset(File &f)
                              ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
         if (memcmp(buf, "data", 4) == 0)
             return f.position();
-        // RIFF chunks are word-aligned; skip this chunk
         f.seek(f.position() + chunkSize + (chunkSize & 1));
     }
     return 0;
 }
 
-// Streams WAV samples to I2S with volume scaling. Exits early if the breath
-// phase changes so the new phase's audio can start without delay.
-static void playWavFile(const char *path, BreathPhase triggerPhase)
+// Load a WAV file from SPIFFS into a PSRAM buffer. Returns sample count.
+static uint32_t loadWavToRam(const char *path, int16_t **outBuf)
 {
-    File f = openWavFile(path);
+    File f = SPIFFS.open(path);
     if (!f)
-        return;
+    {
+        Serial.printf("WAV not found: %s\n", path);
+        return 0;
+    }
 
     uint32_t dataOffset = findWavDataOffset(f);
     if (dataOffset == 0)
     {
         Serial.printf("Bad WAV header: %s\n", path);
         f.close();
-        return;
+        return 0;
     }
+
     f.seek(dataOffset);
+    uint32_t dataBytes = f.size() - dataOffset;
+    uint32_t samples = dataBytes / 2;
 
-    // Static buffers: avoids putting ~3 KB on the FreeRTOS task stack.
-    // Safe because playWavFile is only ever called from soundTask (no reentrancy).
-    static int16_t mono[512];
-    static int16_t stereo[512 * 2];
-
-    while (f.available() && breathPhase == triggerPhase && breatheEnabled && soundEnabled)
+    *outBuf = (int16_t *)ps_malloc(dataBytes);
+    if (!*outBuf)
     {
-        int bytesRead = f.read((uint8_t *)mono, sizeof(mono));
-        if (bytesRead <= 0)
-            break;
+        Serial.printf("PSRAM alloc failed for %s (%u bytes)\n", path, dataBytes);
+        f.close();
+        return 0;
+    }
 
-        int samplesRead = bytesRead / 2;
+    f.read((uint8_t *)*outBuf, dataBytes);
+    f.close();
+    Serial.printf("Loaded %s: %u samples (%u bytes) into PSRAM\n", path, samples, dataBytes);
+    return samples;
+}
+
+static void initWavBuffers()
+{
+    wavLenIn = loadWavToRam("/breath_in.wav", &wavDataIn);
+    wavLenOut = loadWavToRam("/breath_out.wav", &wavDataOut);
+}
+
+static const int FADE_SAMPLES = 64; // 4 ms fade-out at 16 kHz
+
+// Streams pre-loaded WAV samples to I2S with volume scaling.
+// Fades out over FADE_SAMPLES when exiting early due to phase change.
+static void playWavFromRam(const int16_t *data, uint32_t numSamples, BreathPhase triggerPhase)
+{
+    if (!data || numSamples == 0)
+        return;
+
+    static int16_t stereo[512 * 2];
+    uint32_t pos = 0;
+
+    while (pos < numSamples && breathPhase == triggerPhase && breatheEnabled && soundEnabled)
+    {
+        uint32_t chunk = numSamples - pos;
+        if (chunk > 512)
+            chunk = 512;
+
         float volLinear = soundVolume / 100.0f;
-        float volExp = volLinear * volLinear; // square for perceptual loudness
+        float volExp = volLinear * volLinear;
 
-        for (int i = 0; i < samplesRead; i++)
+        for (uint32_t i = 0; i < chunk; i++)
         {
-            int16_t s = (int16_t)(mono[i] * volExp);
+            int16_t s = (int16_t)(data[pos + i] * volExp);
             stereo[i * 2] = s;
             stereo[i * 2 + 1] = s;
         }
         size_t written;
-        i2s_write(I2S_NUM_0, stereo, samplesRead * 4, &written, portMAX_DELAY);
+        i2s_write(I2S_NUM_0, stereo, chunk * 4, &written, portMAX_DELAY);
+        pos += chunk;
     }
-    f.close();
+
+    // Fade-out if we exited early (phase changed or disabled)
+    if (pos < numSamples)
+    {
+        uint32_t fadeLen = numSamples - pos;
+        if (fadeLen > FADE_SAMPLES)
+            fadeLen = FADE_SAMPLES;
+
+        float volLinear = soundVolume / 100.0f;
+        float volExp = volLinear * volLinear;
+
+        for (uint32_t i = 0; i < fadeLen; i++)
+        {
+            float fade = 1.0f - (float)i / FADE_SAMPLES;
+            int16_t s = (int16_t)(data[pos + i] * volExp * fade);
+            stereo[i * 2] = s;
+            stereo[i * 2 + 1] = s;
+        }
+        size_t written;
+        i2s_write(I2S_NUM_0, stereo, fadeLen * 4, &written, portMAX_DELAY);
+    }
 }
 
 // Sends one buffer of silence to keep the I2S clock alive.
@@ -335,6 +403,7 @@ void soundTask(void * /*param*/)
         {
             lastPhase = -1;
             writeSilence();
+            vTaskDelay(1);
             continue;
         }
 
@@ -343,15 +412,15 @@ void soundTask(void * /*param*/)
         if (currentPhase != lastPhase)
         {
             lastPhase = currentPhase;
-            const char *filename = (breathPhase == BREATH_IN)
-                                       ? "/breath_in.wav"
-                                       : "/breath_out.wav";
-            playWavFile(filename, breathPhase);
-            // Fall through to silence loop after WAV ends
+            if (breathPhase == BREATH_IN)
+                playWavFromRam(wavDataIn, wavLenIn, BREATH_IN);
+            else
+                playWavFromRam(wavDataOut, wavLenOut, BREATH_OUT);
         }
         else
         {
             writeSilence();
+            vTaskDelay(1);
         }
     }
 }
@@ -455,6 +524,7 @@ void setup()
     else
         Serial.println("SPIFFS mount failed.");
 
+    initWavBuffers(); // pre-load WAV files into PSRAM for glitch-free playback
     initI2S();
     // Audio task on core 0 with high priority to reduce interruptions
     xTaskCreatePinnedToCore(soundTask, "sound", 8192, NULL, 10, NULL, 0);
@@ -518,8 +588,9 @@ void loop()
                 breatheEnabled = !breatheEnabled;
                 if (breatheEnabled)
                 {
-                    breathPhase = BREATH_IN;
-                    breathStartMs = millis();
+                    breathStartMs = millis(); // write timestamp BEFORE phase
+                    __sync_synchronize();     // ensure Core 1 sees startMs before phase
+                    breathPhase = BREATH_IN;  // phase acts as the "trigger" readers watch
                 }
             }
             else

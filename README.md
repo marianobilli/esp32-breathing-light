@@ -21,8 +21,10 @@ The firmware alternates three quick red flashes and three quick blue flashes in 
 4. [Find your serial port and configure platformio.ini](#4-find-your-serial-port-and-configure-platformioini)
 5. [Build and upload](#5-build-and-upload)
 6. [Running tests](#6-running-tests)
-7. [Project structure](#7-project-structure)
-8. [AI coding agent setup](#8-ai-coding-agent-setup)
+7. [Hardware wiring — LED strip (IRLZ44N MOSFET)](#7-hardware-wiring--led-strip-irlz44n-mosfet)
+8. [Updating the LED envelope after changing audio files](#8-updating-the-led-envelope-after-changing-audio-files)
+9. [Project structure](#9-project-structure)
+10. [AI coding agent setup](#10-ai-coding-agent-setup)
 
 ---
 
@@ -178,7 +180,63 @@ See [how_to_unit_test.md](how_to_unit_test.md) for a full guide on writing and r
 
 ---
 
-## 7. Project structure
+## 7. Hardware wiring — LED strip (IRLZ44N MOSFET)
+
+The LED strip is driven by an **IRLZ44N** logic-level N-channel MOSFET controlled via PWM on **GPIO 1** (5 kHz, 8-bit). The breathing animation varies the duty cycle from 0–100 % over each breath cycle.
+
+### Schematic
+
+```
+12V PSU (+) ──────────────────────────────────── LED Strip (+)
+                                                  LED Strip (–) ─── IRLZ44N Drain (pin 2)
+12V PSU (–) ─── GND rail ──────────────────────── IRLZ44N Source (pin 3)
+                    │
+                    ├──── ESP32 GND
+                    │
+                    └──── 10 kΩ ──── IRLZ44N Gate (pin 1)   ← pull-down
+
+ESP32 GPIO 1 ──── 330 Ω ──── IRLZ44N Gate (pin 1)
+```
+
+### Component notes
+
+| Component | Value | Purpose |
+|-----------|-------|---------|
+| Gate series resistor | 330 Ω | Limits GPIO inrush current on each switching edge |
+| Gate pull-down resistor | 10 kΩ (Gate → GND) | Keeps MOSFET off if GPIO 1 floats during boot/reset |
+| Common ground | Required | 12V PSU GND and ESP32 GND must share the same rail |
+
+The IRLZ44N is a logic-level MOSFET (Vgs(th) ≈ 1–2 V), so 3.3 V from the ESP32 drives it fully on (Rds(on) ≈ 22 mΩ). No level shifter is needed. LED strips are resistive loads, so no flyback diode is required.
+
+---
+
+## 8. Updating the LED envelope after changing audio files
+
+The LED brightness follows the actual amplitude envelope of the breathing audio. The envelope is pre-computed from the WAV files at development time and stored in `include/led_envelope.h`.
+
+**If you replace `data/breath_in.wav` or `data/breath_out.wav`, regenerate the header before building:**
+
+```bash
+# Copy your new WAV files into audio/ as well (audio/ is the source, data/ goes to SPIFFS)
+cp data/breath_in.wav  audio/breath_in.wav
+cp data/breath_out.wav audio/breath_out.wav
+
+# Regenerate the LED envelope header
+python3 tools/gen_led_envelope.py
+```
+
+The script reads the files in `audio/`, computes the RMS amplitude in 50 ms windows, normalises the peak to 255, and overwrites `include/led_envelope.h`. Then rebuild and flash as normal.
+
+**Requirements:** Python 3 standard library only (`wave`, `struct`, `math`). No extra packages needed.
+
+**WAV format the script expects:**
+- 16 kHz sample rate, 16-bit signed PCM, mono
+- `breath_in.wav`: up to 4 s
+- `breath_out.wav`: up to 6 s
+
+---
+
+## 9. Project structure
 
 ```
 .
@@ -186,6 +244,12 @@ See [how_to_unit_test.md](how_to_unit_test.md) for a full guide on writing and r
 ├── AGENTS.md                           # AI coding agent guidelines (see below)
 ├── src/
 │   └── main.cpp                        # Application entry point
+├── include/
+│   └── led_envelope.h                  # Auto-generated LED brightness tables (run tools/gen_led_envelope.py)
+├── audio/                              # Source WAV files (input to gen_led_envelope.py)
+├── data/                               # SPIFFS root — uploaded to flash with `pio run --target uploadfs`
+├── tools/
+│   └── gen_led_envelope.py             # Analyses audio files and writes include/led_envelope.h
 ├── test/
 │   ├── test_basic/                     # Logic tests — run native and on device
 │   └── test_rgb_led/                   # RGB LED smoke tests — device only
@@ -195,7 +259,7 @@ See [how_to_unit_test.md](how_to_unit_test.md) for a full guide on writing and r
 
 ---
 
-## 8. AI coding agent setup
+## 10. AI coding agent setup
 
 This project is developed with **[OpenCode](https://opencode.ai)**, an AI coding assistant that automatically loads `AGENTS.md` as a system-level instruction file for the agent working in this repo.
 
