@@ -4,6 +4,7 @@
 #include <driver/i2s.h>
 #include <math.h>
 #include <SPIFFS.h>
+#include <Preferences.h>
 #include "RotaryEncoder.h"
 #include "led_envelope.h"
 
@@ -94,52 +95,99 @@ void updateButton(Button &btn)
 enum BreathPhase : uint8_t
 {
     BREATH_IN,
-    BREATH_OUT
+    HOLD_IN,
+    BREATH_OUT,
+    HOLD_OUT
 };
 
 static const uint32_t BREATH_IN_MS = 4000;
 static const uint32_t BREATH_OUT_MS = 6000;
 
-volatile bool breatheEnabled = true;
+volatile bool ledEnabled   = true;
 volatile bool soundEnabled = true;
 volatile BreathPhase breathPhase = BREATH_IN;
 volatile uint32_t breathStartMs = 0;
-volatile uint8_t soundVolume = 100;     // 0–100 %
-volatile uint8_t ledMaxIntensity = 100; // 0–100 %
+volatile uint8_t soundVolume = 100;      // 0–100 %
+volatile uint8_t ledMaxIntensity = 100;  // 0–100 %
+volatile uint8_t delayAfterInSec  = 0;  // 0–30 s hold after BREATH_IN
+volatile uint8_t delayAfterOutSec = 0;  // 0–30 s hold after BREATH_OUT
 
-enum MenuState : uint8_t
+enum ScreenId  : uint8_t { SCREEN_MAIN = 0, SCREEN_ONOFF, SCREEN_VOL, SCREEN_BRIGHTNESS, SCREEN_DELAY };
+enum EditState : uint8_t { EDIT_NONE = 0, EDIT_FIRST, EDIT_SECOND };
+
+ScreenId  currentScreen = SCREEN_MAIN;
+EditState editState     = EDIT_NONE;
+
+// ---------------------------------------------------------------------------
+// Persistent config (NVS via Preferences)
+// ---------------------------------------------------------------------------
+Preferences prefs;
+
+void loadConfig()
 {
-    BROWSE,
-    EDIT
-};
-MenuState menuState = BROWSE;
-uint8_t selectedItem = 0; // 0 = Vol, 1 = LED, 2 = ON/OFF
+    prefs.begin("config", /*readOnly=*/true);
+    soundVolume      = prefs.getUChar("vol",    100);
+    ledMaxIntensity  = prefs.getUChar("led",    100);
+    delayAfterInSec  = prefs.getUChar("dlyIn",  0);
+    delayAfterOutSec = prefs.getUChar("dlyOut", 0);
+    ledEnabled       = prefs.getBool("ledEn",   true);
+    soundEnabled     = prefs.getBool("sndEn",   true);
+    prefs.end();
+}
+
+void saveConfig()
+{
+    prefs.begin("config", /*readOnly=*/false);
+    prefs.putUChar("vol",     soundVolume);
+    prefs.putUChar("led",     ledMaxIntensity);
+    prefs.putUChar("dlyIn",   delayAfterInSec);
+    prefs.putUChar("dlyOut",  delayAfterOutSec);
+    prefs.putBool("ledEn",    ledEnabled);
+    prefs.putBool("sndEn",    soundEnabled);
+    prefs.end();
+}
 
 // ---------------------------------------------------------------------------
 // Breathing logic
 // ---------------------------------------------------------------------------
 void updateBreath()
 {
-    if (!breatheEnabled)
-        return;
+    const BreathPhase phase   = breathPhase;
+    const uint32_t    elapsed = millis() - breathStartMs;
+    BreathPhase next;
 
-    uint32_t duration = (breathPhase == BREATH_IN) ? BREATH_IN_MS : BREATH_OUT_MS;
-    uint32_t elapsed = millis() - breathStartMs;
-
-    if (elapsed >= duration)
+    switch (phase)
     {
-        BreathPhase next = (breathPhase == BREATH_IN) ? BREATH_OUT : BREATH_IN;
-        breathStartMs = millis(); // timestamp FIRST — soundTask reads phase as trigger
-        __sync_synchronize();     // full memory barrier: Core 0 sees startMs before phase
-        breathPhase = next;       // phase SECOND — this is what readers poll
+    case BREATH_IN:
+        if (elapsed < BREATH_IN_MS) return;
+        next = (delayAfterInSec > 0) ? HOLD_IN : BREATH_OUT;
+        break;
+    case HOLD_IN:
+        if (elapsed < (uint32_t)delayAfterInSec * 1000UL) return;
+        next = BREATH_OUT;
+        break;
+    case BREATH_OUT:
+        if (elapsed < BREATH_OUT_MS) return;
+        next = (delayAfterOutSec > 0) ? HOLD_OUT : BREATH_IN;
+        break;
+    case HOLD_OUT:
+        if (elapsed < (uint32_t)delayAfterOutSec * 1000UL) return;
+        next = BREATH_IN;
+        break;
+    default:
+        return;
     }
+
+    breathStartMs = millis(); // timestamp FIRST — soundTask reads phase as trigger
+    __sync_synchronize();     // full memory barrier: Core 0 sees startMs before phase
+    breathPhase = next;       // phase SECOND — this is what readers poll
 }
 
 void updateLed()
 {
     // Snapshot volatile shared state once — prevents mixed-phase reads if updateBreath()
     // preempts this task between two volatile reads within a single call.
-    const bool enabled = breatheEnabled;
+    const bool enabled = ledEnabled;
     const BreathPhase phase = breathPhase;
     const uint32_t startMs = breathStartMs;
     const uint8_t maxInt = ledMaxIntensity;
@@ -152,6 +200,26 @@ void updateLed()
             ledcWrite(LED_PWM_CHANNEL, 0);
             lastB = 0;
         }
+        return;
+    }
+
+    // Hold phases: maintain LED at phase-boundary brightness without envelope math.
+    if (phase == HOLD_IN)
+    {
+        // Peak brightness — matches last kLedEnvelopeIn sample (255/255 * peak)
+        uint16_t b = (uint16_t)(LED_MAX_BRIGHT * (maxInt / 100.0f));
+        if (b > 0 && b < LED_MIN_DUTY) b = LED_MIN_DUTY;
+        uint16_t maxStep = (lastB > 100) ? LED_MAX_STEP : (uint16_t)((lastB / 5) + 3);
+        if (maxStep < 3) maxStep = 3;
+        if (b > lastB + maxStep)       b = lastB + maxStep;
+        else if (b + maxStep < lastB)  b = lastB - maxStep;
+        if (b != lastB) { ledcWrite(LED_PWM_CHANNEL, b); lastB = b; }
+        return;
+    }
+    if (phase == HOLD_OUT)
+    {
+        // LED at 0 — matches last kLedEnvelopeOut sample (0)
+        if (lastB != 0) { ledcWrite(LED_PWM_CHANNEL, 0); lastB = 0; }
         return;
     }
 
@@ -336,7 +404,7 @@ static void playWavFromRam(const int16_t *data, uint32_t numSamples, BreathPhase
     static int16_t stereo[512 * 2];
     uint32_t pos = 0;
 
-    while (pos < numSamples && breathPhase == triggerPhase && breatheEnabled && soundEnabled)
+    while (pos < numSamples && breathPhase == triggerPhase && soundEnabled)
     {
         uint32_t chunk = numSamples - pos;
         if (chunk > 512)
@@ -399,7 +467,7 @@ void soundTask(void * /*param*/)
 
     while (true)
     {
-        if (!breatheEnabled || !soundEnabled)
+        if (!soundEnabled)
         {
             lastPhase = -1;
             writeSilence();
@@ -412,10 +480,13 @@ void soundTask(void * /*param*/)
         if (currentPhase != lastPhase)
         {
             lastPhase = currentPhase;
-            if (breathPhase == BREATH_IN)
-                playWavFromRam(wavDataIn, wavLenIn, BREATH_IN);
-            else
-                playWavFromRam(wavDataOut, wavLenOut, BREATH_OUT);
+            switch ((BreathPhase)currentPhase)
+            {
+            case BREATH_IN:  playWavFromRam(wavDataIn,  wavLenIn,  BREATH_IN);  break;
+            case BREATH_OUT: playWavFromRam(wavDataOut, wavLenOut, BREATH_OUT); break;
+            case HOLD_IN:
+            case HOLD_OUT:   break; // silence during hold phases
+            }
         }
         else
         {
@@ -435,36 +506,101 @@ void drawScreen()
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
 
-    // Menu rows — ">" cursor in BROWSE, brackets around value in EDIT
-    char rowVol[24], rowLed[24], rowOnOff[24];
+    char line[22]; // 21 chars + null; 128px / 6px = 21.3 chars max
 
-    if (menuState == BROWSE)
+    switch (currentScreen)
     {
-        snprintf(rowVol, sizeof(rowVol), "%cVol: %u%%",
-                 selectedItem == 0 ? '>' : ' ', (unsigned)soundVolume);
-        snprintf(rowLed, sizeof(rowLed), "%cLED: %u%%",
-                 selectedItem == 1 ? '>' : ' ', (unsigned)ledMaxIntensity);
-        snprintf(rowOnOff, sizeof(rowOnOff), "%cON/OFF: %s",
-                 selectedItem == 2 ? '>' : ' ', breatheEnabled ? "ON" : "OFF");
-    }
-    else
-    {
-        snprintf(rowVol, sizeof(rowVol), "%cVol: %s%u%%%s",
-                 selectedItem == 0 ? '>' : ' ',
-                 selectedItem == 0 ? "[" : "", (unsigned)soundVolume,
-                 selectedItem == 0 ? "]" : "");
-        snprintf(rowLed, sizeof(rowLed), "%cLED: %s%u%%%s",
-                 selectedItem == 1 ? '>' : ' ',
-                 selectedItem == 1 ? "[" : "", (unsigned)ledMaxIntensity,
-                 selectedItem == 1 ? "]" : "");
-        snprintf(rowOnOff, sizeof(rowOnOff), "%cON/OFF: %s",
-                 selectedItem == 2 ? '>' : ' ', breatheEnabled ? "ON" : "OFF");
-    }
-    u8g2.drawStr(0, 14, rowVol);
-    u8g2.drawStr(0, 28, rowLed);
-    u8g2.drawStr(0, 42, rowOnOff);
+    case SCREEN_MAIN:
+        snprintf(line, sizeof(line), "Audio:%-3s  LED:%-3s",
+                 soundEnabled ? "ON" : "OFF", ledEnabled ? "ON" : "OFF");
+        u8g2.drawStr(0, 12, line);
+        snprintf(line, sizeof(line), "Vol:%u%%  Br:%u%%",
+                 (unsigned)soundVolume, (unsigned)ledMaxIntensity);
+        u8g2.drawStr(0, 26, line);
+        snprintf(line, sizeof(line), "DlyIn:%us DlyOut:%us",
+                 (unsigned)delayAfterInSec, (unsigned)delayAfterOutSec);
+        u8g2.drawStr(0, 40, line);
+        break;
 
-    u8g2.drawStr(0, 64, menuState == BROWSE ? "[PUSH=ok BACK=exit]" : "[BAK=done]");
+    case SCREEN_ONOFF:
+        u8g2.drawStr(0, 12, "On/Off");
+        if (editState == EDIT_NONE)
+        {
+            snprintf(line, sizeof(line), ">[Audio: %-3s]", soundEnabled ? "ON" : "OFF");
+            u8g2.drawStr(0, 26, line);
+            snprintf(line, sizeof(line), "  LED:  %-3s", ledEnabled ? "ON" : "OFF");
+            u8g2.drawStr(0, 40, line);
+        }
+        else
+        {
+            snprintf(line, sizeof(line), "  Audio: %-3s", soundEnabled ? "ON" : "OFF");
+            u8g2.drawStr(0, 26, line);
+            snprintf(line, sizeof(line), ">[LED:  %-3s]", ledEnabled ? "ON" : "OFF");
+            u8g2.drawStr(0, 40, line);
+        }
+        u8g2.drawStr(0, 54, "PUSH=toggle");
+        break;
+
+    case SCREEN_VOL:
+        u8g2.drawStr(0, 12, "Volume");
+        if (editState == EDIT_NONE)
+        {
+            snprintf(line, sizeof(line), "  %u%%", (unsigned)soundVolume);
+            u8g2.drawStr(0, 26, line);
+            u8g2.drawStr(0, 54, "PUSH=edit");
+        }
+        else
+        {
+            snprintf(line, sizeof(line), " [%u%%]", (unsigned)soundVolume);
+            u8g2.drawStr(0, 26, line);
+            u8g2.drawStr(0, 54, "PUSH=done");
+        }
+        break;
+
+    case SCREEN_BRIGHTNESS:
+        u8g2.drawStr(0, 12, "Brightness");
+        if (editState == EDIT_NONE)
+        {
+            snprintf(line, sizeof(line), "  %u%%", (unsigned)ledMaxIntensity);
+            u8g2.drawStr(0, 26, line);
+            u8g2.drawStr(0, 54, "PUSH=edit");
+        }
+        else
+        {
+            snprintf(line, sizeof(line), " [%u%%]", (unsigned)ledMaxIntensity);
+            u8g2.drawStr(0, 26, line);
+            u8g2.drawStr(0, 54, "PUSH=done");
+        }
+        break;
+
+    case SCREEN_DELAY:
+        u8g2.drawStr(0, 12, "Breath Delay");
+        if (editState == EDIT_NONE)
+        {
+            snprintf(line, sizeof(line), "After in:  %us", (unsigned)delayAfterInSec);
+            u8g2.drawStr(0, 26, line);
+            snprintf(line, sizeof(line), "After out: %us", (unsigned)delayAfterOutSec);
+            u8g2.drawStr(0, 40, line);
+            u8g2.drawStr(0, 54, "PUSH=edit in");
+        }
+        else if (editState == EDIT_FIRST)
+        {
+            snprintf(line, sizeof(line), "After in: [%us]", (unsigned)delayAfterInSec);
+            u8g2.drawStr(0, 26, line);
+            snprintf(line, sizeof(line), "After out: %us", (unsigned)delayAfterOutSec);
+            u8g2.drawStr(0, 40, line);
+            u8g2.drawStr(0, 54, "PUSH=edit out");
+        }
+        else // EDIT_SECOND
+        {
+            snprintf(line, sizeof(line), "After in:  %us", (unsigned)delayAfterInSec);
+            u8g2.drawStr(0, 26, line);
+            snprintf(line, sizeof(line), "After out:[%us]", (unsigned)delayAfterOutSec);
+            u8g2.drawStr(0, 40, line);
+            u8g2.drawStr(0, 54, "PUSH=done");
+        }
+        break;
+    }
 
     u8g2.sendBuffer();
 }
@@ -500,6 +636,8 @@ void setup()
     Serial.println("u8g2 begin...");
     u8g2.begin();
     Serial.println("u8g2 ok.");
+
+    loadConfig();
 
     breathPhase = BREATH_IN;
     breathStartMs = millis();
@@ -544,31 +682,54 @@ void loop()
 
     if (delta != 0)
     {
-        if (menuState == BROWSE)
+        if (currentScreen == SCREEN_ONOFF)
         {
-            // Navigate between items (wrap 0–2)
-            int8_t next = (int8_t)selectedItem + (delta > 0 ? 1 : -1);
-            if (next < 0)
-                next = 2;
-            else if (next > 2)
-                next = 0;
-            selectedItem = (uint8_t)next;
+            // Move cursor between Audio and LED rows
+            editState = (editState == EDIT_NONE) ? EDIT_FIRST : EDIT_NONE;
+        }
+        else if (editState != EDIT_NONE)
+        {
+            // Adjust the active edit field
+            switch (currentScreen)
+            {
+            case SCREEN_VOL:
+            {
+                int v = (int)soundVolume + (delta * 5);
+                soundVolume = (v < 0) ? 0 : (v > 100) ? 100 : (uint8_t)v;
+                break;
+            }
+            case SCREEN_BRIGHTNESS:
+            {
+                int v = (int)ledMaxIntensity + (delta * 5);
+                ledMaxIntensity = (v < 0) ? 0 : (v > 100) ? 100 : (uint8_t)v;
+                break;
+            }
+            case SCREEN_DELAY:
+                if (editState == EDIT_FIRST)
+                {
+                    int v = (int)delayAfterInSec + delta;
+                    delayAfterInSec = (v < 0) ? 0 : (v > 30) ? 30 : (uint8_t)v;
+                }
+                else // EDIT_SECOND
+                {
+                    int v = (int)delayAfterOutSec + delta;
+                    delayAfterOutSec = (v < 0) ? 0 : (v > 30) ? 30 : (uint8_t)v;
+                }
+                break;
+            default:
+                break;
+            }
         }
         else
         {
-            // Edit selected value in 5% steps (item 2 is ON/OFF, not editable by encoder)
-            if (selectedItem == 0)
-            {
-                int v = (int)soundVolume + (delta * 5);
-                soundVolume = (v < 0) ? 0 : (v > 100) ? 100
-                                                      : (uint8_t)v;
-            }
-            else if (selectedItem == 1)
-            {
-                int v = (int)ledMaxIntensity + (delta * 5);
-                ledMaxIntensity = (v < 0) ? 0 : (v > 100) ? 100
-                                                          : (uint8_t)v;
-            }
+            // Navigate: MAIN(0) ↔ ONOFF(1) ↔ VOL(2) ↔ BRIGHTNESS(3) ↔ DELAY(4)
+            int8_t next = (int8_t)currentScreen + (delta > 0 ? 1 : -1);
+            if (next < (int8_t)SCREEN_MAIN)   next = (int8_t)SCREEN_DELAY;
+            if (next > (int8_t)SCREEN_DELAY)  next = (int8_t)SCREEN_MAIN;
+            currentScreen = (ScreenId)next;
+            // Reset cursor when entering On/Off screen
+            if (currentScreen == SCREEN_ONOFF)
+                editState = EDIT_NONE;
         }
     }
 
@@ -580,22 +741,36 @@ void loop()
     if (btnPsh.pressed)
     {
         btnPsh.pressed = false;
-        if (menuState == BROWSE)
+
+        if (currentScreen == SCREEN_ONOFF)
         {
-            if (selectedItem == 2)
-            {
-                // Toggle ON/OFF
-                breatheEnabled = !breatheEnabled;
-                if (breatheEnabled)
-                {
-                    breathStartMs = millis(); // write timestamp BEFORE phase
-                    __sync_synchronize();     // ensure Core 1 sees startMs before phase
-                    breathPhase = BREATH_IN;  // phase acts as the "trigger" readers watch
-                }
-            }
+            // Toggle selected item
+            if (editState == EDIT_NONE)
+                soundEnabled = !soundEnabled;
+            else
+                ledEnabled = !ledEnabled;
+            saveConfig();
+        }
+        else if (currentScreen == SCREEN_VOL || currentScreen == SCREEN_BRIGHTNESS)
+        {
+            // Toggle EDIT_NONE <-> EDIT_FIRST; save when exiting edit
+            if (editState == EDIT_NONE)
+                editState = EDIT_FIRST;
             else
             {
-                menuState = EDIT;
+                editState = EDIT_NONE;
+                saveConfig();
+            }
+        }
+        else if (currentScreen == SCREEN_DELAY)
+        {
+            // Cycle EDIT_NONE -> EDIT_FIRST -> EDIT_SECOND -> EDIT_NONE; save when done
+            if      (editState == EDIT_NONE)   editState = EDIT_FIRST;
+            else if (editState == EDIT_FIRST)  editState = EDIT_SECOND;
+            else
+            {
+                editState = EDIT_NONE;
+                saveConfig();
             }
         }
     }
@@ -603,7 +778,11 @@ void loop()
     if (btnBak.pressed)
     {
         btnBak.pressed = false;
-        menuState = BROWSE;
+        // Save any in-progress edits, then return to main
+        if (editState != EDIT_NONE)
+            saveConfig();
+        currentScreen = SCREEN_MAIN;
+        editState     = EDIT_NONE;
     }
 
     if (btnCon.pressed)
