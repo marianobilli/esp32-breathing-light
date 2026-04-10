@@ -112,7 +112,7 @@ volatile uint8_t ledMaxIntensity = 100;  // 0–100 %
 volatile uint8_t delayAfterInSec  = 0;  // 0–30 s hold after BREATH_IN
 volatile uint8_t delayAfterOutSec = 0;  // 0–30 s hold after BREATH_OUT
 
-enum ScreenId  : uint8_t { SCREEN_MAIN = 0, SCREEN_ONOFF, SCREEN_VOL, SCREEN_BRIGHTNESS, SCREEN_DELAY };
+enum ScreenId  : uint8_t { SCREEN_MAIN = 0, SCREEN_LED, SCREEN_AUDIO, SCREEN_VOL, SCREEN_BRIGHTNESS, SCREEN_DELAY };
 enum EditState : uint8_t { EDIT_NONE = 0, EDIT_FIRST, EDIT_SECOND };
 
 ScreenId  currentScreen = SCREEN_MAIN;
@@ -522,22 +522,21 @@ void drawScreen()
         u8g2.drawStr(0, 40, line);
         break;
 
-    case SCREEN_ONOFF:
-        u8g2.drawStr(0, 12, "On/Off");
-        if (editState == EDIT_NONE)
-        {
-            snprintf(line, sizeof(line), ">[Audio: %-3s]", soundEnabled ? "ON" : "OFF");
-            u8g2.drawStr(0, 26, line);
-            snprintf(line, sizeof(line), "  LED:  %-3s", ledEnabled ? "ON" : "OFF");
-            u8g2.drawStr(0, 40, line);
-        }
-        else
-        {
-            snprintf(line, sizeof(line), "  Audio: %-3s", soundEnabled ? "ON" : "OFF");
-            u8g2.drawStr(0, 26, line);
-            snprintf(line, sizeof(line), ">[LED:  %-3s]", ledEnabled ? "ON" : "OFF");
-            u8g2.drawStr(0, 40, line);
-        }
+    case SCREEN_LED:
+        u8g2.drawStr(0, 12, "LED");
+        snprintf(line, sizeof(line), " >[%s]", ledEnabled ? "ON" : "OFF");
+        u8g2.drawStr(0, 26, line);
+        u8g2.drawStr(0, 54, "PUSH=toggle");
+        break;
+
+    case SCREEN_AUDIO:
+        u8g2.drawStr(0, 12, "Audio");
+        snprintf(line, sizeof(line), " >[%s]", soundEnabled ? "ON" : "OFF");
+        u8g2.drawStr(0, 26, line);
+        snprintf(line, sizeof(line), "In:%s Out:%s",
+                 wavLenIn  > 0 ? "OK" : "MISSING",
+                 wavLenOut > 0 ? "OK" : "MISSING");
+        u8g2.drawStr(0, 40, line);
         u8g2.drawStr(0, 54, "PUSH=toggle");
         break;
 
@@ -682,12 +681,7 @@ void loop()
 
     if (delta != 0)
     {
-        if (currentScreen == SCREEN_ONOFF)
-        {
-            // Move cursor between Audio and LED rows
-            editState = (editState == EDIT_NONE) ? EDIT_FIRST : EDIT_NONE;
-        }
-        else if (editState != EDIT_NONE)
+        if (editState != EDIT_NONE)
         {
             // Adjust the active edit field
             switch (currentScreen)
@@ -727,9 +721,6 @@ void loop()
             if (next < (int8_t)SCREEN_MAIN)   next = (int8_t)SCREEN_DELAY;
             if (next > (int8_t)SCREEN_DELAY)  next = (int8_t)SCREEN_MAIN;
             currentScreen = (ScreenId)next;
-            // Reset cursor when entering On/Off screen
-            if (currentScreen == SCREEN_ONOFF)
-                editState = EDIT_NONE;
         }
     }
 
@@ -742,13 +733,14 @@ void loop()
     {
         btnPsh.pressed = false;
 
-        if (currentScreen == SCREEN_ONOFF)
+        if (currentScreen == SCREEN_LED)
         {
-            // Toggle selected item
-            if (editState == EDIT_NONE)
-                soundEnabled = !soundEnabled;
-            else
-                ledEnabled = !ledEnabled;
+            ledEnabled = !ledEnabled;
+            saveConfig();
+        }
+        else if (currentScreen == SCREEN_AUDIO)
+        {
+            soundEnabled = !soundEnabled;
             saveConfig();
         }
         else if (currentScreen == SCREEN_VOL || currentScreen == SCREEN_BRIGHTNESS)
@@ -776,14 +768,7 @@ void loop()
     }
 
     if (btnBak.pressed)
-    {
         btnBak.pressed = false;
-        // Save any in-progress edits, then return to main
-        if (editState != EDIT_NONE)
-            saveConfig();
-        currentScreen = SCREEN_MAIN;
-        editState     = EDIT_NONE;
-    }
 
     if (btnCon.pressed)
     {
