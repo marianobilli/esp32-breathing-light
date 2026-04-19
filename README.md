@@ -54,9 +54,10 @@ New to PlatformIO or this board? The rest of this document walks through it end-
 5. [Build and upload](#5-build-and-upload)
 6. [Running tests](#6-running-tests)
 7. [Hardware wiring — LED strip (IRLZ44N MOSFET)](#7-hardware-wiring--led-strip-irlz44n-mosfet)
-8. [Updating the LED envelope after changing audio files](#8-updating-the-led-envelope-after-changing-audio-files)
-9. [Project structure](#9-project-structure)
-10. [AI coding agent setup](#10-ai-coding-agent-setup)
+8. [Rotary encoder notes](#8-rotary-encoder-notes)
+9. [Updating the LED envelope after changing audio files](#9-updating-the-led-envelope-after-changing-audio-files)
+10. [Project structure](#10-project-structure)
+11. [AI coding agent setup](#11-ai-coding-agent-setup)
 
 ---
 
@@ -252,7 +253,17 @@ The IRLZ44N is a logic-level MOSFET (Vgs(th) ≈ 1–2 V), so 3.3 V from the ESP
 
 ---
 
-## 8. Updating the LED envelope after changing audio files
+## 8. Rotary encoder notes
+
+The menu uses a plain KY-040-style rotary encoder on GPIO 5 (A/CLK) and GPIO 4 (B/DT), with the push switch on GPIO 6. Decoding goes through the **`RotaryEncoder`** library (pulled in via `lib_deps` as `mbed-aluqard/arduino`), which handles the quadrature state machine and interrupt setup — writing this from scratch against the raw A/B signal was the single hardest part of bring-up, and the library made it straightforward.
+
+**Known issue — mechanical bounce.** Even with the library's built-in debouncing, cheap encoders occasionally register **two steps for a single detent**, causing the menu to skip an option. This is a hardware-level contact bounce problem, not a software one — the encoder's switches are genuinely closing and opening multiple times per click. Adding more aggressive software filtering trades one bug for another (missed detents at fast rotation).
+
+**Workaround / todo:** swap in a higher-quality encoder (e.g. Bourns PEC11R, Alps EC11) with cleaner detents and tighter bounce specs. A small hardware RC filter (typically 10 kΩ pull-up + 10 nF to GND on each of A and B, near the encoder) also helps when the encoder can't be replaced. Not yet tested on this board.
+
+---
+
+## 9. Updating the LED envelope after changing audio files
 
 The LED represents "air in the lungs" and its brightness curve is derived from the breathing audio. The curves are pre-computed in Python and baked into `include/led_envelope.h` as lookup tables; firmware just indexes the tables at each 10 ms tick.
 
@@ -306,7 +317,7 @@ python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
 
 ---
 
-## 9. Project structure
+## 10. Project structure
 
 ```
 .
@@ -331,7 +342,7 @@ python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
 
 ---
 
-## 10. AI coding agent setup
+## 11. AI coding agent setup
 
 As mentioned up top, this project was **vibe coded** — most of the firmware, the envelope tool, and this README were produced by an AI coding agent working from short prompts and iterating against a real board. The agent is kept on-rails by a single rulebook at the repo root: [`CLAUDE.md`](CLAUDE.md).
 
