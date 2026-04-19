@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LED envelope visualization</title>
+<style>
+  body { font: 14px/1.4 system-ui, -apple-system, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .meta { color: #666; font-size: 12px; margin-bottom: 24px; }
+  section { margin-bottom: 32px; }
+  section header { font-weight: 600; margin-bottom: 4px; }
+  section .stats { color: #666; font-size: 12px; margin-bottom: 6px; }
+  .legend { font-size: 12px; color: #555; margin-top: 4px; margin-bottom: 6px; }
+  .legend span { margin-right: 14px; white-space: nowrap; }
+  .swatch { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 4px; }
+  .swatch.dashed { height: 0; border-top: 2px dashed currentColor; }
+  svg { width: 100%; height: auto; display: block; background: #fff; border: 1px solid #eee; }
+  .tooltip { position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 4px 8px; border-radius: 3px; font-size: 11px; pointer-events: none; white-space: nowrap; z-index: 10; }
+  .axis text { font: 10px sans-serif; fill: #555; }
+  .grid line { stroke: #eee; }
+</style>
+</head>
+<body>
+<h1>LED envelope visualization</h1>
+<div class="meta">
+  Generated <span id="gen-time"></span>
+  &middot; on_db = <span id="on-db"></span> dBFS
+  &middot; off_db = <span id="off-db"></span> dBFS
+  &middot; firmware profiles = <span id="profiles"></span>
+  &middot; window = <span id="win-ms"></span> ms
+</div>
+<div id="charts"></div>
+<div id="tooltip" class="tooltip" style="display:none"></div>
+
+<script>
+window.envelopeData = {"generated_at": "2026-04-19 18:01:22", "on_db": -40.0, "off_db": -52.0, "profile_bends": [0.0, 0.9, 1.5, 2.5], "window_ms": 50, "clips": [{"name": "breath_in", "filename": "breath_in.wav", "rms_db": [-50.68, -49.85, -51.3, -46.86, -51.07, -53.09, -50.18, -51.73, -49.98, -51.78, -52.55, -53.62, -42.22, -48.25, -47.78, -43.05, -43.7, -41.31, -39.91, -41.07, -38.64, -38.61, -38.29, -37.23, -38.13, -36.8, -38.19, -36.18, -34.39, -34.5, -32.17, -33.61, -32.4, -31.06, -31.45, -29.59, -28.35, -29.95, -28.22, -30.74, -28.76, -29.95, -28.44, -27.4, -26.59, -25.09, -26.7, -26.52, -25.53, -24.44, -27.05, -27.24, -27.16, -27.23, -27.08, -26.62, -26.84, -28.54, -28.34, -27.78, -27.58, -27.13, -31.27, -30.7, -31.41, -28.55, -29.69, -31.56, -34.29, -33.38, -35.57, -36.25, -38.1, -39.38, -38.54, -38.71, -41.3, -44.34, -46.96, -45.98], "series": [{"bend": 0.0, "color": "hsl(180, 75%, 45%)", "brightness": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 8, 12, 16, 21, 25, 29, 33, 37, 41, 45, 49, 53, 58, 62, 66, 70, 74, 78, 82, 86, 90, 95, 99, 103, 107, 111, 115, 119, 123, 128, 132, 136, 140, 144, 148, 152, 156, 160, 165, 169, 173, 177, 181, 185, 189, 193, 197, 202, 206, 210, 214, 218, 222, 226, 230, 234, 239, 243, 247, 251, 255]}, {"bend": 0.9, "color": "hsl(120, 75%, 45%)", "brightness": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 6, 8, 11, 13, 16, 18, 21, 23, 27, 30, 34, 37, 41, 45, 49, 54, 59, 64, 70, 74, 79, 84, 89, 95, 101, 108, 114, 120, 127, 134, 140, 145, 151, 157, 163, 169, 175, 180, 186, 191, 197, 203, 207, 212, 216, 221, 226, 230, 233, 237, 240, 242, 245, 247, 249, 251, 253, 254, 254, 255]}, {"bend": 1.5, "color": "hsl(60, 75%, 45%)", "brightness": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 4, 5, 7, 8, 10, 11, 13, 16, 19, 22, 25, 29, 33, 37, 42, 48, 53, 59, 64, 70, 75, 80, 87, 94, 102, 109, 116, 124, 133, 139, 146, 153, 160, 166, 173, 180, 186, 192, 199, 205, 212, 216, 221, 225, 230, 236, 240, 242, 245, 248, 250, 251, 252, 253, 255, 255, 255, 255, 255]}, {"bend": 2.5, "color": "hsl(0, 75%, 45%)", "brightness": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 3, 4, 6, 10, 12, 15, 19, 23, 28, 35, 40, 47, 51, 58, 63, 69, 77, 85, 94, 103, 111, 120, 130, 138, 146, 153, 161, 169, 177, 185, 191, 198, 205, 212, 220, 224, 228, 232, 239, 244, 248, 250, 252, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255]}], "avg_db": -32.48, "peak_db": -24.44, "first_in_s": 0.9, "last_in_s": 3.95, "ascending": true}, {"name": "breath_out", "filename": "breath_out.wav", "rms_db": [-48.17, -48.55, -48.25, -50.17, -50.85, -48.12, -49.61, -50.56, -49.48, -49.14, -48.45, -48.41, -51.29, -50.2, -49.31, -49.94, -51.09, -52.02, -50.44, -48.89, -52.54, -50.73, -50.0, -51.13, -50.77, -50.21, -50.56, -50.42, -51.47, -49.77, -50.68, -52.26, -52.12, -50.8, -49.58, -48.9, -48.25, -48.85, -45.66, -42.01, -39.3, -37.81, -35.43, -36.03, -36.67, -35.1, -36.02, -34.53, -36.28, -33.47, -34.03, -33.88, -34.31, -33.01, -33.77, -32.41, -32.68, -33.5, -30.91, -32.38, -32.44, -31.53, -32.55, -31.83, -31.34, -30.93, -30.27, -29.66, -32.73, -30.35, -31.71, -29.56, -30.44, -31.54, -30.77, -31.91, -31.47, -32.41, -34.51, -34.37, -34.68, -36.28, -35.86, -36.72, -33.65, -33.93, -34.55, -36.07, -35.67, -36.86, -38.1, -37.31, -38.68, -41.71, -40.06, -39.14, -41.76, -40.3, -41.64, -41.65, -41.34, -41.94, -40.91, -42.26, -42.3, -43.56, -44.76, -47.93, -48.38, -48.35, -46.9, -47.5, -48.85, -50.61, -50.24, -50.51, -51.06, -48.42, -54.65, -49.17], "series": [{"bend": 0.0, "color": "hsl(180, 75%, 45%)", "brightness": [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 252, 249, 245, 242, 239, 236, 233, 230, 226, 223, 220, 217, 214, 210, 207, 204, 201, 198, 194, 191, 188, 185, 182, 178, 175, 172, 169, 166, 163, 159, 156, 153, 150, 147, 143, 140, 137, 134, 131, 128, 124, 121, 118, 115, 112, 108, 105, 102, 99, 96, 92, 89, 86, 83, 80, 77, 73, 70, 67, 64, 61, 57, 54, 51, 48, 45, 41, 38, 35, 32, 29, 25, 22, 19, 16, 13, 10, 6, 3, 0]}, {"bend": 0.9, "color": "hsl(120, 75%, 45%)", "brightness": [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 252, 250, 246, 243, 240, 236, 233, 229, 226, 222, 218, 214, 210, 206, 202, 198, 193, 189, 184, 180, 176, 171, 167, 162, 157, 153, 147, 142, 138, 133, 128, 123, 118, 113, 108, 104, 99, 95, 91, 87, 84, 80, 77, 74, 70, 66, 62, 59, 56, 53, 50, 47, 44, 42, 40, 37, 35, 33, 30, 28, 26, 24, 21, 19, 17, 15, 14, 12, 11, 10, 9, 7, 6, 5, 4, 3, 3, 1, 1, 0]}, {"bend": 1.5, "color": "hsl(60, 75%, 45%)", "brightness": [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 253, 250, 247, 243, 240, 237, 233, 229, 226, 222, 217, 213, 209, 204, 200, 195, 190, 186, 180, 175, 170, 165, 160, 154, 149, 143, 137, 131, 126, 120, 115, 109, 103, 97, 92, 86, 81, 76, 72, 68, 64, 61, 57, 54, 50, 46, 42, 38, 35, 32, 30, 27, 25, 23, 21, 19, 17, 15, 14, 12, 10, 9, 7, 5, 4, 3, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]}, {"bend": 2.5, "color": "hsl(0, 75%, 45%)", "brightness": [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 253, 251, 248, 245, 242, 238, 235, 231, 228, 223, 219, 214, 210, 205, 200, 195, 190, 185, 178, 173, 168, 162, 156, 150, 144, 138, 131, 124, 119, 112, 106, 99, 92, 86, 79, 74, 68, 62, 58, 54, 50, 47, 44, 41, 36, 32, 28, 25, 21, 19, 17, 14, 13, 12, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}], "avg_db": -37.73, "peak_db": -29.56, "first_in_s": 2.0, "last_in_s": 5.95, "ascending": false}]};
+</script>
+
+<script>
+
+(function () {
+  const data = window.envelopeData;
+  document.getElementById('gen-time').textContent = data.generated_at;
+  document.getElementById('on-db').textContent = data.on_db.toFixed(1);
+  document.getElementById('off-db').textContent = data.off_db.toFixed(1);
+  document.getElementById('profiles').textContent =
+    '[' + data.profile_bends.map(b => b.toFixed(2)).join(', ') + ']';
+  document.getElementById('win-ms').textContent = data.window_ms;
+
+  const isProfile = b => data.profile_bends.some(p => Math.abs(p - b) < 1e-6);
+
+  const charts = document.getElementById('charts');
+  const tooltip = document.getElementById('tooltip');
+
+  data.clips.forEach(clip => {
+    const sec = document.createElement('section');
+    const dur = (clip.rms_db.length * data.window_ms / 1000).toFixed(2);
+    sec.innerHTML =
+      '<header>' + clip.filename + ' — ' + (clip.ascending ? 'inhale (LED 0 \u2192 255)' : 'exhale (LED 255 \u2192 0)') + '</header>' +
+      '<div class="stats">' +
+        dur + 's &middot; ' + clip.rms_db.length + ' windows &middot; ' +
+        'avg = ' + clip.avg_db.toFixed(1) + ' dBFS &middot; ' +
+        'peak = ' + clip.peak_db.toFixed(1) + ' dBFS &middot; ' +
+        'active = [' + clip.first_in_s.toFixed(2) + 's .. ' + clip.last_in_s.toFixed(2) + 's]' +
+      '</div>' +
+      '<div class="legend">' +
+        '<span style="color:#555"><span class="swatch" style="background:#888"></span>volume (dBFS, left axis)</span>' +
+        clip.series.map(s =>
+          '<span style="color:' + s.color + '">' +
+          '<span class="swatch" style="background:' + s.color + '"></span>' +
+          'LED bend=' + s.bend.toFixed(2) +
+          (isProfile(s.bend) ? ' \u2605' : '') +
+          '</span>'
+        ).join('') +
+        '<span style="color:#9a3412"><span class="swatch dashed"></span>on_db</span>' +
+        '<span style="color:#7f1d1d"><span class="swatch dashed"></span>off_db</span>' +
+        '<span style="color:#065f46"><span class="swatch dashed"></span>active region</span>' +
+      '</div>' +
+      '<div class="chart-container" style="position:relative"></div>';
+    charts.appendChild(sec);
+    renderChart(sec.querySelector('.chart-container'), clip, data);
+  });
+
+  function pickStep(range, targetTicks) {
+    if (range <= 0) return 1;
+    const raw = range / targetTicks;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    let nice;
+    if (norm < 1.5) nice = 1;
+    else if (norm < 3) nice = 2;
+    else if (norm < 7) nice = 5;
+    else nice = 10;
+    return nice * mag;
+  }
+
+  function renderChart(container, clip, data) {
+    const W = 1000, H = 340;
+    const m = { top: 16, right: 56, bottom: 32, left: 56 };
+    const pw = W - m.left - m.right;
+    const ph = H - m.top - m.bottom;
+
+    const winS = data.window_ms / 1000;
+    const n = clip.rms_db.length;
+    const tMax = n * winS;
+
+    let dbMin = Math.min.apply(null, clip.rms_db);
+    if (!isFinite(dbMin)) dbMin = -80;
+    dbMin = Math.floor(dbMin / 10) * 10;
+    // also include thresholds in the visible range
+    dbMin = Math.min(dbMin, Math.floor(Math.min(data.on_db, data.off_db) / 10) * 10);
+    const dbMax = 0;
+
+    const xOf = t => m.left + (t / tMax) * pw;
+    const yDb = db => m.top + (1 - (Math.max(dbMin, Math.min(db, dbMax)) - dbMin) / (dbMax - dbMin)) * ph;
+    const yBr = br => m.top + (1 - br / 255) * ph;
+
+    const xStep = pickStep(tMax, 10);
+    const xTicks = [];
+    for (let t = 0; t <= tMax + 1e-9; t += xStep) xTicks.push(t);
+
+    const dbTicks = [];
+    for (let v = dbMin; v <= dbMax + 1e-9; v += 10) dbTicks.push(v);
+
+    const brTicks = [0, 50, 100, 150, 200, 250];
+
+    const dbPath = clip.rms_db
+      .map((v, i) => (i ? 'L' : 'M') + xOf(i * winS).toFixed(1) + ',' + yDb(v).toFixed(1))
+      .join(' ');
+
+    const brPaths = clip.series.map(s => ({
+      bend:  s.bend,
+      color: s.color,
+      width: isProfile(s.bend) ? 2.25 : 1.25,
+      d: s.brightness
+        .map((v, i) => (i ? 'L' : 'M') + xOf(i * winS).toFixed(1) + ',' + yBr(v).toFixed(1))
+        .join(' '),
+    }));
+
+    const onY  = yDb(data.on_db);
+    const offY = yDb(data.off_db);
+
+    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet">';
+    svg += '<rect x="' + m.left + '" y="' + m.top + '" width="' + pw + '" height="' + ph + '" fill="#fafafa" stroke="#ccc"/>';
+
+    svg += '<g class="grid">';
+    xTicks.forEach(t => {
+      const x = xOf(t);
+      svg += '<line x1="' + x + '" y1="' + m.top + '" x2="' + x + '" y2="' + (m.top + ph) + '" />';
+    });
+    dbTicks.forEach(v => {
+      const y = yDb(v);
+      svg += '<line x1="' + m.left + '" y1="' + y + '" x2="' + (m.left + pw) + '" y2="' + y + '" />';
+    });
+    svg += '</g>';
+
+    svg += '<line x1="' + m.left + '" y1="' + onY  + '" x2="' + (m.left + pw) + '" y2="' + onY  + '" stroke="#f97316" stroke-width="1" stroke-dasharray="6 3" />';
+    svg += '<line x1="' + m.left + '" y1="' + offY + '" x2="' + (m.left + pw) + '" y2="' + offY + '" stroke="#dc2626" stroke-width="1" stroke-dasharray="6 3" />';
+
+    [clip.first_in_s, clip.last_in_s].forEach(t => {
+      const x = xOf(t);
+      svg += '<line x1="' + x + '" y1="' + m.top + '" x2="' + x + '" y2="' + (m.top + ph) + '" stroke="#10b981" stroke-width="1" stroke-dasharray="3 3" />';
+    });
+
+    svg += '<path d="' + dbPath + '" fill="none" stroke="#888" stroke-width="1.5"/>';
+    brPaths.forEach(p => {
+      svg += '<path d="' + p.d + '" fill="none" stroke="' + p.color + '" stroke-width="' + p.width + '"/>';
+    });
+
+    svg += '<g class="axis">';
+    xTicks.forEach(t => {
+      const x = xOf(t);
+      const label = (t < 1 ? t.toFixed(2) : t.toFixed(1)) + 's';
+      svg += '<text x="' + x + '" y="' + (m.top + ph + 14) + '" text-anchor="middle">' + label + '</text>';
+    });
+    dbTicks.forEach(v => {
+      const y = yDb(v);
+      svg += '<text x="' + (m.left - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + v + '</text>';
+    });
+    brTicks.forEach(v => {
+      const y = yBr(v);
+      svg += '<text x="' + (m.left + pw + 6) + '" y="' + (y + 3) + '" text-anchor="start">' + v + '</text>';
+    });
+    svg += '<text x="' + (m.left + pw - 4) + '" y="' + (onY  - 3) + '" text-anchor="end" fill="#f97316">on=' + data.on_db.toFixed(0) + '</text>';
+    svg += '<text x="' + (m.left + pw - 4) + '" y="' + (offY - 3) + '" text-anchor="end" fill="#dc2626">off=' + data.off_db.toFixed(0) + '</text>';
+    svg += '</g>';
+
+    svg += '<line class="crosshair" x1="0" y1="' + m.top + '" x2="0" y2="' + (m.top + ph) + '" stroke="#000" stroke-width="0.5" style="display:none" />';
+    svg += '</svg>';
+    container.innerHTML = svg;
+
+    const svgEl = container.querySelector('svg');
+    const crosshair = svgEl.querySelector('.crosshair');
+    svgEl.addEventListener('mousemove', e => {
+      const rect = svgEl.getBoundingClientRect();
+      const scaleX = W / rect.width;
+      const xSvg = (e.clientX - rect.left) * scaleX;
+      if (xSvg < m.left || xSvg > m.left + pw) {
+        crosshair.style.display = 'none';
+        tooltip.style.display = 'none';
+        return;
+      }
+      const t = (xSvg - m.left) / pw * tMax;
+      const idx = Math.max(0, Math.min(n - 1, Math.round(t / winS)));
+      const sx = xOf(idx * winS);
+      crosshair.setAttribute('x1', sx);
+      crosshair.setAttribute('x2', sx);
+      crosshair.style.display = '';
+      tooltip.style.display = '';
+      tooltip.style.left = (e.pageX + 12) + 'px';
+      tooltip.style.top  = (e.pageY + 12) + 'px';
+      let tipHtml =
+        't = ' + (idx * winS).toFixed(2) + 's<br>' +
+        'dBFS = ' + clip.rms_db[idx].toFixed(1);
+      clip.series.forEach(s => {
+        const star = isProfile(s.bend) ? ' &#9733;' : '';
+        tipHtml += '<br><span style="color:' + s.color + '">&#9632;</span>' +
+                   ' bend=' + s.bend.toFixed(2) + star + ': LED=' + s.brightness[idx];
+      });
+      tooltip.innerHTML = tipHtml;
+    });
+    svgEl.addEventListener('mouseleave', () => {
+      crosshair.style.display = 'none';
+      tooltip.style.display = 'none';
+    });
+  }
+})();
+
+</script>
+</body>
+</html>

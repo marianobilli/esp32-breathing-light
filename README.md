@@ -212,27 +212,78 @@ The IRLZ44N is a logic-level MOSFET (Vgs(th) ≈ 1–2 V), so 3.3 V from the ESP
 
 ## 8. Updating the LED envelope after changing audio files
 
-The LED brightness follows the actual amplitude envelope of the breathing audio. The envelope is pre-computed from the WAV files at development time and stored in `include/led_envelope.h`.
+The LED represents "air in the lungs" and its brightness curve is
+derived from the breathing audio. The curves are pre-computed in Python
+and baked into `include/led_envelope.h` as lookup tables; firmware just
+indexes the tables at each 10 ms tick.
 
-**If you replace `data/breath_in.wav` or `data/breath_out.wav`, regenerate the header before building:**
+### Regenerating after changing the WAVs
 
 ```bash
-# Copy your new WAV files into audio/ as well (audio/ is the source, data/ goes to SPIFFS)
-cp data/breath_in.wav  audio/breath_in.wav
-cp data/breath_out.wav audio/breath_out.wav
-
-# Regenerate the LED envelope header
 python3 tools/gen_led_envelope.py
 ```
 
-The script reads the files in `audio/`, computes the RMS amplitude in 50 ms windows, normalises the peak to 255, and overwrites `include/led_envelope.h`. Then rebuild and flash as normal.
+Reads `data/breath_in.wav` and `data/breath_out.wav`, writes
+`include/led_envelope.h` (used at build time) and
+`tools/envelope_viz.html` (a self-contained visualization — open it in
+a browser to see the volume envelope and all brightness curves
+overlaid). Then `pio run -t upload` to flash.
 
-**Requirements:** Python 3 standard library only (`wave`, `struct`, `math`). No extra packages needed.
+**WAV format:** 16 kHz, 16-bit signed PCM, mono. 80 × 50 ms windows for
+the inhale (4.0 s), 120 × 50 ms windows for the exhale (6.0 s). These
+lengths are baked into `updateLed()` in `src/main.cpp`, so changing the
+durations requires updating `envN` there too.
 
-**WAV format the script expects:**
-- 16 kHz sample rate, 16-bit signed PCM, mono
-- `breath_in.wav`: up to 4 s
-- `breath_out.wav`: up to 6 s
+### How the envelope is shaped
+
+For each clip the generator:
+
+1. Splits the audio into 50 ms windows and computes per-window RMS in
+   dBFS.
+2. Finds the **active region** — the portion where audio is actually
+   audible — using two thresholds:
+   - `--on-db`  (default `-40`): first window above this is the audio
+     onset (skips the silent lead-in / room-noise floor).
+   - `--off-db` (default `-52`): last window above this is the fade-out
+     (catches the quiet tail of the exhale).
+3. Builds a piecewise-linear **slope weight** for each window inside the
+   active region: `1.0` at the active-region's average dBFS, scaled to
+   `[1 - bend, 1 + bend]` at the quietest/loudest windows. A weight > 1
+   makes the LED advance faster through loud sections; weight < 1 slows
+   it through quiet sections. Weight = 1 everywhere gives a pure linear
+   ramp.
+4. Cumulative-sums the weights and normalizes to `[0, 255]` so the LED
+   starts at 0 (or 255 for exhale) at the active region's first window
+   and reaches 255 (or 0) at the last.
+5. Holds the endpoint values outside the active region, so the LED
+   stays dark through the silent lead-in of the inhale, stays at peak
+   through `HOLD_IN` and the silent lead-in of the exhale, then reaches
+   zero by the end of the audible decay.
+
+### Runtime-switchable bend profiles
+
+The generator emits **four bend profiles** by default (`0.00, 0.90,
+1.50, 2.50`), each as its own table pair plus `#define
+LED_ENV_NUM_PROFILES 4`. The OLED menu's **Bend** screen cycles through
+them live — no re-flashing needed. Inhale and exhale have independent
+settings, saved to NVS under `bendIdxIn` / `bendIdxOut`.
+
+Pick which profiles get baked in with `--profile-bends`:
+
+```bash
+python3 tools/gen_led_envelope.py --profile-bends "0.0,0.9,1.5,2.5"
+```
+
+The viz plots `--compare-bends` (defaults to `--profile-bends` so you
+see exactly what the device can switch between). Pass a different list
+to compare values beyond what's flashed:
+
+```bash
+python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
+```
+
+**Requirements:** Python 3 standard library only (`wave`, `struct`,
+`math`, `json`). No extra packages.
 
 ---
 
@@ -246,10 +297,10 @@ The script reads the files in `audio/`, computes the RMS amplitude in 50 ms wind
 │   └── main.cpp                        # Application entry point
 ├── include/
 │   └── led_envelope.h                  # Auto-generated LED brightness tables (run tools/gen_led_envelope.py)
-├── audio/                              # Source WAV files (input to gen_led_envelope.py)
-├── data/                               # SPIFFS root — uploaded to flash with `pio run --target uploadfs`
+├── data/                               # SPIFFS root (WAVs + runtime assets); uploaded with `pio run --target uploadfs`
 ├── tools/
-│   └── gen_led_envelope.py             # Analyses audio files and writes include/led_envelope.h
+│   ├── gen_led_envelope.py             # Reads data/*.wav, writes include/led_envelope.h and envelope_viz.html
+│   └── envelope_viz.html               # Generated visualization — open in a browser after regenerating
 ├── test/
 │   ├── test_basic/                     # Logic tests — run native and on device
 │   └── test_rgb_led/                   # RGB LED smoke tests — device only

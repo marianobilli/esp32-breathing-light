@@ -112,8 +112,13 @@ volatile uint8_t ledMaxIntensity = 100;  // 0–100 %
 volatile uint8_t delayAfterInSec  = 0;  // 0–30 s hold after BREATH_IN
 volatile uint8_t delayAfterOutSec = 0;  // 0–30 s hold after BREATH_OUT
 
-enum ScreenId  : uint8_t { SCREEN_MAIN = 0, SCREEN_LED, SCREEN_AUDIO, SCREEN_VOL, SCREEN_BRIGHTNESS, SCREEN_DELAY };
+enum ScreenId  : uint8_t { SCREEN_MAIN = 0, SCREEN_LED, SCREEN_AUDIO, SCREEN_VOL, SCREEN_BRIGHTNESS, SCREEN_BEND, SCREEN_DELAY };
 enum EditState : uint8_t { EDIT_NONE = 0, EDIT_FIRST, EDIT_SECOND };
+
+// Separate bend profile per phase — the inhale and exhale WAVs have different
+// loudness shapes, so the "right" amount of slope modulation differs too.
+volatile uint8_t currentBendIdxIn  = 0;  // index into kLedEnvelopeInProfiles
+volatile uint8_t currentBendIdxOut = 0;  // index into kLedEnvelopeOutProfiles
 
 ScreenId  currentScreen = SCREEN_MAIN;
 EditState editState     = EDIT_NONE;
@@ -132,6 +137,12 @@ void loadConfig()
     delayAfterOutSec = prefs.getUChar("dlyOut", 0);
     ledEnabled       = prefs.getBool("ledEn",   true);
     soundEnabled     = prefs.getBool("sndEn",   true);
+    // Legacy single-index key used as fallback for both if per-phase keys are unset.
+    uint8_t legacy   = prefs.getUChar("bendIdx", 0);
+    currentBendIdxIn  = prefs.getUChar("bendIdxIn",  legacy);
+    currentBendIdxOut = prefs.getUChar("bendIdxOut", legacy);
+    if (currentBendIdxIn  >= LED_ENV_NUM_PROFILES) currentBendIdxIn  = 0;
+    if (currentBendIdxOut >= LED_ENV_NUM_PROFILES) currentBendIdxOut = 0;
     prefs.end();
 }
 
@@ -144,6 +155,8 @@ void saveConfig()
     prefs.putUChar("dlyOut",  delayAfterOutSec);
     prefs.putBool("ledEn",    ledEnabled);
     prefs.putBool("sndEn",    soundEnabled);
+    prefs.putUChar("bendIdxIn",  currentBendIdxIn);
+    prefs.putUChar("bendIdxOut", currentBendIdxOut);
     prefs.end();
 }
 
@@ -191,6 +204,9 @@ void updateLed()
     const BreathPhase phase = breathPhase;
     const uint32_t startMs = breathStartMs;
     const uint8_t maxInt = ledMaxIntensity;
+    // Snapshot both so a mid-tick menu change can't pick mismatched pointers.
+    const uint8_t bendIdxIn  = currentBendIdxIn;
+    const uint8_t bendIdxOut = currentBendIdxOut;
 
     static uint16_t lastB = 0; // 0xFFFF would cause a spurious spike on first tick with the slew clamp
     if (!enabled)
@@ -230,7 +246,8 @@ void updateLed()
 
     // Use pre-computed RMS envelope derived from the actual audio files.
     // Linear interpolation between adjacent 50 ms envelope samples.
-    const uint8_t *env = (phase == BREATH_IN) ? kLedEnvelopeIn : kLedEnvelopeOut;
+    const uint8_t *env = (phase == BREATH_IN) ? kLedEnvelopeInProfiles[bendIdxIn]
+                                               : kLedEnvelopeOutProfiles[bendIdxOut];
     const uint8_t envN = (phase == BREATH_IN) ? 80 : 120;
 
     float pos = (float)elapsed / duration * (envN - 1);
@@ -239,15 +256,12 @@ void updateLed()
     float frac = pos - lo;
     float val = env[lo] + frac * (env[hi] - env[lo]);
 
-    // kLedEnvelopeIn  is ascending  0→255: norm goes 0→1, gamma 2.2 for perceptual linearity.
-    // kLedEnvelopeOut is descending 255→0: norm goes 1→0, used directly (no inversion, no
-    // gamma) so the LED remains visibly lit throughout the exhalation and reaches exactly
-    // zero at the end of the phase.
+    // Both envelope tables already encode the final perceptual shape
+    // (threshold-triggered, average-anchored linear ramp, slope-modulated
+    // by the audio's own dBFS). No runtime gamma or inversion needed.
     float norm = val / 255.0f;
     float peak = LED_MAX_BRIGHT * (maxInt / 100.0f);
-    uint16_t b = (phase == BREATH_IN)
-                     ? (uint16_t)(powf(norm, 2.2f) * peak)
-                     : (uint16_t)(norm * peak);
+    uint16_t b = (uint16_t)(norm * peak);
 
     // Floor: avoid sub-threshold duty where MOSFET operates in linear region
     if (b > 0 && b < LED_MIN_DUTY)
@@ -520,6 +534,10 @@ void drawScreen()
         snprintf(line, sizeof(line), "DlyIn:%us DlyOut:%us",
                  (unsigned)delayAfterInSec, (unsigned)delayAfterOutSec);
         u8g2.drawStr(0, 40, line);
+        snprintf(line, sizeof(line), "Bend I:%s O:%s",
+                 kLedEnvelopeProfileLabels[currentBendIdxIn],
+                 kLedEnvelopeProfileLabels[currentBendIdxOut]);
+        u8g2.drawStr(0, 54, line);
         break;
 
     case SCREEN_LED:
@@ -571,6 +589,23 @@ void drawScreen()
             u8g2.drawStr(0, 54, "PUSH=done");
         }
         break;
+
+    case SCREEN_BEND:
+    {
+        u8g2.drawStr(0, 12, "Bend");
+        const char *inLbl  = kLedEnvelopeProfileLabels[currentBendIdxIn];
+        const char *outLbl = kLedEnvelopeProfileLabels[currentBendIdxOut];
+        snprintf(line, sizeof(line), (editState == EDIT_FIRST)  ? "In:  [%s]" : "In:   %s",  inLbl);
+        u8g2.drawStr(0, 26, line);
+        snprintf(line, sizeof(line), (editState == EDIT_SECOND) ? "Out: [%s]" : "Out:  %s",  outLbl);
+        u8g2.drawStr(0, 40, line);
+        const char *footer =
+            (editState == EDIT_NONE)  ? "PUSH=edit in"  :
+            (editState == EDIT_FIRST) ? "PUSH=edit out" :
+                                        "PUSH=done";
+        u8g2.drawStr(0, 54, footer);
+        break;
+    }
 
     case SCREEN_DELAY:
         u8g2.drawStr(0, 12, "Breath Delay");
@@ -698,6 +733,16 @@ void loop()
                 ledMaxIntensity = (v < 0) ? 0 : (v > 100) ? 100 : (uint8_t)v;
                 break;
             }
+            case SCREEN_BEND:
+            {
+                const int n = LED_ENV_NUM_PROFILES;
+                volatile uint8_t *target = (editState == EDIT_FIRST) ? &currentBendIdxIn
+                                                                     : &currentBendIdxOut;
+                int v = ((int)*target + delta) % n;
+                if (v < 0) v += n;
+                *target = (uint8_t)v;
+                break;
+            }
             case SCREEN_DELAY:
                 if (editState == EDIT_FIRST)
                 {
@@ -716,7 +761,7 @@ void loop()
         }
         else
         {
-            // Navigate: MAIN(0) ↔ ONOFF(1) ↔ VOL(2) ↔ BRIGHTNESS(3) ↔ DELAY(4)
+            // Navigate: MAIN ↔ LED ↔ AUDIO ↔ VOL ↔ BRIGHTNESS ↔ BEND ↔ DELAY (wraps)
             int8_t next = (int8_t)currentScreen + (delta > 0 ? 1 : -1);
             if (next < (int8_t)SCREEN_MAIN)   next = (int8_t)SCREEN_DELAY;
             if (next > (int8_t)SCREEN_DELAY)  next = (int8_t)SCREEN_MAIN;
@@ -754,7 +799,7 @@ void loop()
                 saveConfig();
             }
         }
-        else if (currentScreen == SCREEN_DELAY)
+        else if (currentScreen == SCREEN_BEND || currentScreen == SCREEN_DELAY)
         {
             // Cycle EDIT_NONE -> EDIT_FIRST -> EDIT_SECOND -> EDIT_NONE; save when done
             if      (editState == EDIT_NONE)   editState = EDIT_FIRST;
