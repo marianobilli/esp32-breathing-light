@@ -229,6 +229,20 @@ Reads `data/breath_in.wav` and `data/breath_out.wav`, writes
 a browser to see the volume envelope and all brightness curves
 overlaid). Then `pio run -t upload` to flash.
 
+Example output (grey line = per-window dBFS, coloured lines = LED
+brightness under each bend value, dashed orange/red = on/off
+thresholds, dashed grey verticals = active region):
+
+![breath_in viz](docs/breath_in.png)
+
+![breath_out viz](docs/breath_out.png)
+
+Inhale: LED stays at 0 until the audio crosses `on_db` (~0.9 s), then
+rises to 255 by the last `off_db` crossing (~3.95 s). Exhale: mirror —
+held at 255 until the audio onset (~2.0 s), falls to 0 by the fade-out
+(~5.95 s). Louder `bend` values bow the curve more steeply toward the
+loud sections of the audio.
+
 **WAV format:** 16 kHz, 16-bit signed PCM, mono. 80 × 50 ms windows for
 the inhale (4.0 s), 120 × 50 ms windows for the exhale (6.0 s). These
 lengths are baked into `updateLed()` in `src/main.cpp`, so changing the
