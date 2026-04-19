@@ -58,6 +58,7 @@ New to PlatformIO or this board? The rest of this document walks through it end-
 9. [Updating the LED envelope after changing audio files](#9-updating-the-led-envelope-after-changing-audio-files)
 10. [Project structure](#10-project-structure)
 11. [AI coding agent setup](#11-ai-coding-agent-setup)
+12. [License](#12-license)
 
 ---
 
@@ -365,3 +366,20 @@ board_build.extra_flags =
 These flags redirect Arduino's `Serial` object to the USB CDC interface so that serial output is visible from boot. Without them, `Serial.print()` goes to UART0 — a hardware UART pin that nothing is connected to — and `pio test` hangs forever waiting for output.
 
 > Side effect: `Serial.flush()` becomes blocking when no serial monitor is open. Do not leave firmware running `Serial.flush()` without a connected monitor.
+
+---
+
+## 12. License
+
+This project is licensed under [**Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International**](https://creativecommons.org/licenses/by-nc-sa/4.0/) (CC BY-NC-SA 4.0). See [`LICENSE`](LICENSE) for the full text.
+
+In short, you are free to:
+
+- **Share** — copy and redistribute the material in any medium or format
+- **Adapt** — remix, transform, and build upon the material
+
+Under the following terms:
+
+- **Attribution** — give appropriate credit and link to the license.
+- **NonCommercial** — you may not use the material for commercial purposes.
+- **ShareAlike** — if you remix or build on it, you must distribute your contributions under the same license.
