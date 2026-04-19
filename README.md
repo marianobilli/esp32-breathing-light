@@ -1,15 +1,47 @@
-# ESP32 Hello World — PlatformIO
+# Breathing Light
 
-A basic example for the **YD-ESP32-23** board that flashes the onboard RGB LED in red and blue like a police car light bar.
+A hardware breath pacer. A warm LED strip rises and falls in time with recorded inhale/exhale audio so you can follow along and regulate your breathing — eyes open or closed.
 
-The firmware alternates three quick red flashes and three quick blue flashes in a continuous loop, using the built-in NeoPixel on GPIO 48 and the `neopixelWrite()` helper provided by the Arduino-ESP32 framework.
+Runs on an ESP32-S3 with an OLED + rotary encoder menu to tweak volume, brightness, pause length, and the curve shape of the light. Settings persist across power cycles.
 
-- **Board:** YD-ESP32-23 (ESP32-S3 DevKitC-1 clone)
-- **Flash:** 16 MB
-- **PSRAM:** 8 MB (OPI)
-- **Framework:** Arduino via PlatformIO
+> **Vibe coded with [Claude Code](https://www.anthropic.com/claude-code).** This repo is an experiment in letting an AI coding agent drive most of the implementation while I steer — more "describe what I want, review the diff" than hand-written line by line. [`CLAUDE.md`](CLAUDE.md) at the repo root is the agent's rulebook. See [section 10](#10-ai-coding-agent-setup).
 
-> New to PlatformIO? Start here. This guide walks you through setup, the physical board, and how to build and run your first test.
+![breath_in viz](docs/breath_in.png)
+
+---
+
+## What it does
+
+- **Plays** a recorded inhale (4 s) and exhale (6 s) loop through an I2S DAC.
+- **Breathes** a 12 V LED strip in sync with the audio — the brightness curve is derived from the RMS envelope of the WAV files, so the light actually tracks the sound of the breath rather than just a sine wave.
+- **Pauses** between phases by a configurable amount (0–30 s each side) for box-breathing style patterns.
+- **Menu** on a 128×64 OLED — rotary encoder to scroll/edit, confirm + back buttons to navigate. LED and audio can be toggled independently.
+- **Remembers** all settings in NVS (flash).
+
+### Hardware
+
+| Part | Role |
+|---|---|
+| YD-ESP32-23 (ESP32-S3, 16 MB flash, 8 MB PSRAM) | MCU |
+| SH1106 128×64 OLED | Menu display |
+| Rotary encoder + 2 push buttons | Input |
+| PCM5102 I2S DAC + small amp/speaker | Audio out |
+| IRLZ44N MOSFET + 12 V LED strip | Light |
+
+---
+
+## Quick start
+
+```bash
+# 1. Install PlatformIO (VS Code extension, or: pip install platformio)
+# 2. Plug the board into its UART USB-C port (see §3)
+# 3. Find your serial port and update platformio.ini (see §4)
+pio run --target upload      # flash firmware
+pio run --target uploadfs    # flash WAVs to SPIFFS
+pio device monitor           # watch serial
+```
+
+New to PlatformIO or this board? The rest of this document walks through it end-to-end.
 
 ---
 
@@ -31,9 +63,9 @@ The firmware alternates three quick red flashes and three quick blue flashes in 
 ## 1. Prerequisites
 
 - A computer running macOS, Linux, or Windows
-- Python 3.8 or newer (required by PlatformIO)
+- Python 3.8 or newer (required by PlatformIO, and by the envelope generator in §8)
 - A USB-C cable (data-capable, not charge-only)
-- The YD-ESP32-23 board
+- The YD-ESP32-23 board, wired as in §7 and `modules_connections.md`
 
 ---
 
@@ -143,13 +175,21 @@ Build the project (compiles without uploading):
 pio run
 ```
 
-Build and flash to the board:
+Build and flash firmware:
 
 ```bash
 pio run --target upload
 ```
 
-Open the serial monitor to see output:
+Flash the SPIFFS partition with the breath WAVs in `data/`:
+
+```bash
+pio run --target uploadfs
+```
+
+You only need to re-run `uploadfs` when the files in `data/` change. The LED envelope tables (`include/led_envelope.h`) are separately baked into firmware — see §8.
+
+Open the serial monitor:
 
 ```bash
 pio device monitor
@@ -182,7 +222,9 @@ See [how_to_unit_test.md](how_to_unit_test.md) for a full guide on writing and r
 
 ## 7. Hardware wiring — LED strip (IRLZ44N MOSFET)
 
-The LED strip is driven by an **IRLZ44N** logic-level N-channel MOSFET controlled via PWM on **GPIO 1** (5 kHz, 8-bit). The breathing animation varies the duty cycle from 0–100 % over each breath cycle.
+The LED strip is driven by an **IRLZ44N** logic-level N-channel MOSFET controlled via PWM on **GPIO 1** (25 kHz, 10-bit — above the audio band, so no audible coil whine from the strip). The breathing animation varies the duty cycle across each breath cycle.
+
+For the full pin map (OLED, rotary encoder, buttons, I2S DAC) see [`modules_connections.md`](modules_connections.md).
 
 ### Schematic
 
@@ -212,10 +254,7 @@ The IRLZ44N is a logic-level MOSFET (Vgs(th) ≈ 1–2 V), so 3.3 V from the ESP
 
 ## 8. Updating the LED envelope after changing audio files
 
-The LED represents "air in the lungs" and its brightness curve is
-derived from the breathing audio. The curves are pre-computed in Python
-and baked into `include/led_envelope.h` as lookup tables; firmware just
-indexes the tables at each 10 ms tick.
+The LED represents "air in the lungs" and its brightness curve is derived from the breathing audio. The curves are pre-computed in Python and baked into `include/led_envelope.h` as lookup tables; firmware just indexes the tables at each 10 ms tick.
 
 ### Regenerating after changing the WAVs
 
@@ -223,64 +262,33 @@ indexes the tables at each 10 ms tick.
 python3 tools/gen_led_envelope.py
 ```
 
-Reads `data/breath_in.wav` and `data/breath_out.wav`, writes
-`include/led_envelope.h` (used at build time) and
-`tools/envelope_viz.html` (a self-contained visualization — open it in
-a browser to see the volume envelope and all brightness curves
-overlaid). Then `pio run -t upload` to flash.
+Reads `data/breath_in.wav` and `data/breath_out.wav`, writes `include/led_envelope.h` (used at build time) and `tools/envelope_viz.html` (a self-contained visualization — open it in a browser to see the volume envelope and all brightness curves overlaid). Then `pio run -t upload` to flash.
 
-Example output (grey line = per-window dBFS, coloured lines = LED
-brightness under each bend value, dashed orange/red = on/off
-thresholds, dashed grey verticals = active region):
+Example output (grey line = per-window dBFS, coloured lines = LED brightness under each bend value, dashed orange/red = on/off thresholds, dashed grey verticals = active region):
 
 ![breath_in viz](docs/breath_in.png)
 
 ![breath_out viz](docs/breath_out.png)
 
-Inhale: LED stays at 0 until the audio crosses `on_db` (~0.9 s), then
-rises to 255 by the last `off_db` crossing (~3.95 s). Exhale: mirror —
-held at 255 until the audio onset (~2.0 s), falls to 0 by the fade-out
-(~5.95 s). Louder `bend` values bow the curve more steeply toward the
-loud sections of the audio.
+Inhale: LED stays at 0 until the audio crosses `on_db` (~0.9 s), then rises to 255 by the last `off_db` crossing (~3.95 s). Exhale: mirror — held at 255 until the audio onset (~2.0 s), falls to 0 by the fade-out (~5.95 s). Louder `bend` values bow the curve more steeply toward the loud sections of the audio.
 
-**WAV format:** 16 kHz, 16-bit signed PCM, mono. 80 × 50 ms windows for
-the inhale (4.0 s), 120 × 50 ms windows for the exhale (6.0 s). These
-lengths are baked into `updateLed()` in `src/main.cpp`, so changing the
-durations requires updating `envN` there too.
+**WAV format:** 16 kHz, 16-bit signed PCM, mono. 80 × 50 ms windows for the inhale (4.0 s), 120 × 50 ms windows for the exhale (6.0 s). These lengths are baked into `updateLed()` in `src/main.cpp`, so changing the durations requires updating `envN` there too.
 
 ### How the envelope is shaped
 
 For each clip the generator:
 
-1. Splits the audio into 50 ms windows and computes per-window RMS in
-   dBFS.
-2. Finds the **active region** — the portion where audio is actually
-   audible — using two thresholds:
-   - `--on-db`  (default `-40`): first window above this is the audio
-     onset (skips the silent lead-in / room-noise floor).
-   - `--off-db` (default `-52`): last window above this is the fade-out
-     (catches the quiet tail of the exhale).
-3. Builds a piecewise-linear **slope weight** for each window inside the
-   active region: `1.0` at the active-region's average dBFS, scaled to
-   `[1 - bend, 1 + bend]` at the quietest/loudest windows. A weight > 1
-   makes the LED advance faster through loud sections; weight < 1 slows
-   it through quiet sections. Weight = 1 everywhere gives a pure linear
-   ramp.
-4. Cumulative-sums the weights and normalizes to `[0, 255]` so the LED
-   starts at 0 (or 255 for exhale) at the active region's first window
-   and reaches 255 (or 0) at the last.
-5. Holds the endpoint values outside the active region, so the LED
-   stays dark through the silent lead-in of the inhale, stays at peak
-   through `HOLD_IN` and the silent lead-in of the exhale, then reaches
-   zero by the end of the audible decay.
+1. Splits the audio into 50 ms windows and computes per-window RMS in dBFS.
+2. Finds the **active region** — the portion where audio is actually audible — using two thresholds:
+   - `--on-db`  (default `-40`): first window above this is the audio onset (skips the silent lead-in / room-noise floor).
+   - `--off-db` (default `-52`): last window above this is the fade-out (catches the quiet tail of the exhale).
+3. Builds a piecewise-linear **slope weight** for each window inside the active region: `1.0` at the active-region's average dBFS, scaled to `[1 - bend, 1 + bend]` at the quietest/loudest windows. A weight > 1 makes the LED advance faster through loud sections; weight < 1 slows it through quiet sections. Weight = 1 everywhere gives a pure linear ramp.
+4. Cumulative-sums the weights and normalizes to `[0, 255]` so the LED starts at 0 (or 255 for exhale) at the active region's first window and reaches 255 (or 0) at the last.
+5. Holds the endpoint values outside the active region, so the LED stays dark through the silent lead-in of the inhale, stays at peak through `HOLD_IN` and the silent lead-in of the exhale, then reaches zero by the end of the audible decay.
 
 ### Runtime-switchable bend profiles
 
-The generator emits **four bend profiles** by default (`0.00, 0.90,
-1.50, 2.50`), each as its own table pair plus `#define
-LED_ENV_NUM_PROFILES 4`. The OLED menu's **Bend** screen cycles through
-them live — no re-flashing needed. Inhale and exhale have independent
-settings, saved to NVS under `bendIdxIn` / `bendIdxOut`.
+The generator emits **four bend profiles** by default (`0.00, 0.90, 1.50, 2.50`), each as its own table pair plus `#define LED_ENV_NUM_PROFILES 4`. The OLED menu's **Bend** screen cycles through them live — no re-flashing needed. Inhale and exhale have independent settings, saved to NVS under `bendIdxIn` / `bendIdxOut`.
 
 Pick which profiles get baked in with `--profile-bends`:
 
@@ -288,16 +296,13 @@ Pick which profiles get baked in with `--profile-bends`:
 python3 tools/gen_led_envelope.py --profile-bends "0.0,0.9,1.5,2.5"
 ```
 
-The viz plots `--compare-bends` (defaults to `--profile-bends` so you
-see exactly what the device can switch between). Pass a different list
-to compare values beyond what's flashed:
+The viz plots `--compare-bends` (defaults to `--profile-bends` so you see exactly what the device can switch between). Pass a different list to compare values beyond what's flashed:
 
 ```bash
 python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
 ```
 
-**Requirements:** Python 3 standard library only (`wave`, `struct`,
-`math`, `json`). No extra packages.
+**Requirements:** Python 3 standard library only (`wave`, `struct`, `math`, `json`). No extra packages.
 
 ---
 
@@ -306,15 +311,17 @@ python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
 ```
 .
 ├── platformio.ini                      # Board, framework, and environment config
-├── AGENTS.md                           # AI coding agent guidelines (see below)
+├── CLAUDE.md                           # AI coding agent rulebook (see §10)
+├── modules_connections.md              # Full ESP32 ↔ peripherals pin map
 ├── src/
-│   └── main.cpp                        # Application entry point
+│   └── main.cpp                        # setup()/loop(): menu, breath state machine, LED + audio
 ├── include/
 │   └── led_envelope.h                  # Auto-generated LED brightness tables (run tools/gen_led_envelope.py)
-├── data/                               # SPIFFS root (WAVs + runtime assets); uploaded with `pio run --target uploadfs`
+├── data/                               # SPIFFS root (breath_in.wav, breath_out.wav); upload with `pio run -t uploadfs`
 ├── tools/
 │   ├── gen_led_envelope.py             # Reads data/*.wav, writes include/led_envelope.h and envelope_viz.html
 │   └── envelope_viz.html               # Generated visualization — open in a browser after regenerating
+├── docs/                               # Screenshots of the envelope viz (referenced from this README)
 ├── test/
 │   ├── test_basic/                     # Logic tests — run native and on device
 │   └── test_rgb_led/                   # RGB LED smoke tests — device only
@@ -326,16 +333,11 @@ python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
 
 ## 10. AI coding agent setup
 
-This project is developed with **[OpenCode](https://opencode.ai)**, an AI coding assistant that automatically loads `AGENTS.md` as a system-level instruction file for the agent working in this repo.
+As mentioned up top, this project was **vibe coded** — most of the firmware, the envelope tool, and this README were produced by an AI coding agent working from short prompts and iterating against a real board. The agent is kept on-rails by a single rulebook at the repo root: [`CLAUDE.md`](CLAUDE.md).
 
-`AGENTS.md` contains board-specific rules, build constraints, partition table requirements, USB serial flags, and testing conventions that the agent must follow. It is the single source of truth for how code should be written and validated in this project.
+This project is developed with **[Claude Code](https://www.anthropic.com/claude-code)**, which automatically loads `CLAUDE.md` from the project root as system-level context for every session. It contains the board-specific rules, build invariants, partition table requirements, USB serial flags, testing conventions, and breath-loop specifics that the agent must respect — the single source of truth for how code should be written and validated here.
 
-**Using Claude Code instead?** Rename `AGENTS.md` to `CLAUDE.md`. Claude Code reads `CLAUDE.md` from the project root and loads it as agent context automatically. The content is identical — only the filename needs to change.
-
-| Tool | Instruction file |
-|------|-----------------|
-| OpenCode | `AGENTS.md` |
-| Claude Code | `CLAUDE.md` |
+**Using a different agent?** Most AI coding tools read a conventionally-named file from the repo root. Symlink `CLAUDE.md` to whatever yours expects (e.g. `ln -s CLAUDE.md AGENTS.md` for OpenCode/Codex, or `GEMINI.md` for Gemini CLI) — the content is identical.
 
 ### Key configuration notes
 
