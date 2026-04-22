@@ -279,13 +279,29 @@ python3 tools/gen_led_envelope.py
 pio run -t upload && pio run -t uploadfs
 ```
 
+**Tuning knobs** (all optional, all passed to the generator in step 2):
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--on-db` | `-40` | First-crossing dBFS threshold — marks the audio onset (where the LED starts rising from 0). Lower it for quiet recordings. |
+| `--off-db` | `-52` | Last-crossing dBFS threshold — marks the fade-out (where the LED reaches peak). Lower it to capture more of a long exhale tail. |
+| `--profile-bends` | `0.0,0.9,1.5,2.5` | Comma-separated bend values baked into the header as runtime-switchable profiles. The OLED menu cycles through these per-phase. |
+| `--compare-bends` | matches `--profile-bends` | Bend values plotted in `envelope_viz.html` for visual comparison. Doesn't affect firmware — useful for exploring shapes before committing. |
+
+Example — a quiet recording with four bend profiles:
+
+```bash
+python3 tools/gen_led_envelope.py --on-db -45 --off-db -55 \
+    --profile-bends "0.0,1.0,2.0,3.5"
+```
+
+Open `tools/envelope_viz.html` after running to see the effect. If the generator errors with `No window crosses on-threshold …`, your recording is quieter than `--on-db` — lower it.
+
 **Filename stems matter:** the firmware opens `/breath_in.wav` and `/breath_out.wav` from SPIFFS, so your input files must be named `breath_in.*` and `breath_out.*`. The extension is free; the generator globs for them. After conversion, `data/breath_in.wav` / `data/breath_out.wav` are overwritten with the canonical version so `pio run -t uploadfs` flashes the right format.
 
 **WAV length = phase duration.** The generator derives `BREATH_IN_MS` / `BREATH_OUT_MS` and the envelope window counts (`LED_ENV_IN_N`, `LED_ENV_OUT_N`) from the total audio length and emits them as `#define`s in `include/led_envelope.h`. To change the cadence to, say, a 6 s inhale + 8 s exhale, just record files of that length — no source edits. Lengths round down to the nearest 50 ms window (e.g. 6.03 s → 120 windows = 6.00 s). Any silence before the first / after the last threshold crossing is treated as an LED hold: dark at the head of the inhale, peak at the tail, and so on.
 
 The generator also writes `tools/envelope_viz.html` — a self-contained visualization you can open in a browser to see the volume envelope and all brightness curves overlaid.
-
-**If your recording is very quiet** the generator may error with `No window crosses on-threshold …`. Lower the detection thresholds: `python3 tools/gen_led_envelope.py --on-db -45 --off-db -55`.
 
 Example output (grey line = per-window dBFS, coloured lines = LED brightness under each bend value, dashed orange/red = on/off thresholds, dashed grey verticals = active region):
 
