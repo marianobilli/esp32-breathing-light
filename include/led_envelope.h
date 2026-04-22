@@ -24,6 +24,11 @@
 #include <stdint.h>
 
 #define LED_ENV_NUM_PROFILES 4
+#define LED_ENV_WINDOW_MS   50
+#define LED_ENV_IN_N        80
+#define LED_ENV_OUT_N       120
+#define BREATH_IN_MS        (LED_ENV_IN_N  * LED_ENV_WINDOW_MS)
+#define BREATH_OUT_MS       (LED_ENV_OUT_N * LED_ENV_WINDOW_MS)
 
 static const uint8_t kLedEnvelopeIn_0[80] = {
       0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,

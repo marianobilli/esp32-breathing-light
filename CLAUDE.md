@@ -141,7 +141,7 @@ See `how_to_unit_test.md` for the long-form guide.
 
 ## Breath loop specifics
 
-- `BREATH_IN_MS = 4000`, `BREATH_OUT_MS = 6000` (in `src/main.cpp`). Changing these requires regenerating `include/led_envelope.h` with matching window counts (80 × 50 ms inhale, 120 × 50 ms exhale) and updating the `envN` constants in `updateLed()`.
+- `BREATH_IN_MS`, `BREATH_OUT_MS`, `LED_ENV_IN_N`, `LED_ENV_OUT_N`, and `LED_ENV_WINDOW_MS` are emitted into `include/led_envelope.h` by `tools/gen_led_envelope.py` — they derive from the WAV lengths. To change cadence: replace `data/breath_in.*` / `data/breath_out.*` (any format; the generator auto-converts via ffmpeg), run the generator, then `pio run -t upload && pio run -t uploadfs`. No source edits needed.
 - LED PWM: GPIO 1, 25 kHz, 10-bit, with a slew limiter (`LED_MAX_STEP`) and a minimum non-zero duty (`LED_MIN_DUTY`) to avoid MOSFET linear-region flicker. Preserve these when refactoring.
 - I2S: BCLK=2, WS=41, DOUT=42, 16 kHz — matches the WAV format the envelope generator expects.
 - Bend profiles are selected at runtime via the OLED menu and persisted per-phase (`bendIdxIn`, `bendIdxOut` in NVS); keep both indices bounded by `LED_ENV_NUM_PROFILES`.

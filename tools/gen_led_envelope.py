@@ -20,10 +20,15 @@ Both clips share the same pair (they were recorded with the same setup).
 """
 
 import argparse
+import glob
 import json
 import math
 import os
+import shutil
 import struct
+import subprocess
+import sys
+import tempfile
 import wave
 from datetime import datetime
 
@@ -54,6 +59,72 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT   = os.path.dirname(SCRIPT_DIR)
 AUDIO_DIR   = os.path.join(REPO_ROOT, "data")
 INCLUDE_DIR = os.path.join(REPO_ROOT, "include")
+
+
+def _is_canonical_wav(path: str) -> bool:
+    """True if the file is already 16-bit mono WAV at SAMPLE_RATE."""
+    try:
+        with wave.open(path, "rb") as wf:
+            return (wf.getsampwidth() == 2
+                    and wf.getnchannels() == 1
+                    and wf.getframerate() == SAMPLE_RATE)
+    except (wave.Error, EOFError):
+        return False
+
+
+def _ffmpeg_convert(src: str, dst: str) -> None:
+    """Transcode src to 16-bit mono WAV at SAMPLE_RATE at dst."""
+    if shutil.which("ffmpeg") is None:
+        sys.exit(
+            f"error: '{src}' is not 16-bit mono {SAMPLE_RATE} Hz WAV and "
+            f"ffmpeg is not installed.\n"
+            f"Install it (macOS: 'brew install ffmpeg') or pre-convert the file."
+        )
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-i", src, "-ac", "1", "-ar", str(SAMPLE_RATE),
+         "-sample_fmt", "s16", dst],
+        check=True,
+    )
+
+
+def find_breath_source(stem: str) -> str:
+    """Return path to breath_{stem}.*; prefer .wav, else first other match."""
+    wav_path = os.path.join(AUDIO_DIR, f"breath_{stem}.wav")
+    if os.path.exists(wav_path):
+        return wav_path
+    candidates = sorted(glob.glob(os.path.join(AUDIO_DIR, f"breath_{stem}.*")))
+    if not candidates:
+        sys.exit(f"error: no data/breath_{stem}.* file found")
+    return candidates[0]
+
+
+def ensure_canonical_wav(src: str) -> str:
+    """Ensure data/breath_{in,out}.wav is canonical. Returns the canonical path.
+
+    If src is already canonical, returns it unchanged. Otherwise converts via
+    ffmpeg and writes the result to data/breath_{in,out}.wav (overwriting any
+    non-canonical .wav in place), so `pio run -t uploadfs` flashes what the
+    firmware's I2S setup expects. Non-.wav sources are left untouched.
+    """
+    base, ext = os.path.splitext(src)
+    canonical = base + ".wav" if ext.lower() != ".wav" else src
+
+    if _is_canonical_wav(src) and canonical == src:
+        return src
+
+    # Convert to a temp file first so a failure doesn't corrupt data/.
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        _ffmpeg_convert(src, tmp_path)
+        shutil.move(tmp_path, canonical)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    print(f"converted {os.path.basename(src)} -> {os.path.basename(canonical)} "
+          f"(16-bit mono {SAMPLE_RATE} Hz)")
+    return canonical
 
 
 def rms_envelope(path: str) -> list[float]:
@@ -475,8 +546,11 @@ def main():
     if any(b < 0.0 for b in args.compare_bends):
         parser.error("--compare-bends values must all be >= 0")
 
-    rms_in  = rms_envelope(os.path.join(AUDIO_DIR, "breath_in.wav"))
-    rms_out = rms_envelope(os.path.join(AUDIO_DIR, "breath_out.wav"))
+    src_in  = ensure_canonical_wav(find_breath_source("in"))
+    src_out = ensure_canonical_wav(find_breath_source("out"))
+
+    rms_in  = rms_envelope(src_in)
+    rms_out = rms_envelope(src_out)
 
     # Compute one (table_in, table_out) pair per profile bend.
     profile_tables_in  = []
@@ -545,6 +619,11 @@ def main():
 #include <stdint.h>
 
 #define LED_ENV_NUM_PROFILES {nprof}
+#define LED_ENV_WINDOW_MS   {WINDOW_MS}
+#define LED_ENV_IN_N        {n_in}
+#define LED_ENV_OUT_N       {n_out}
+#define BREATH_IN_MS        (LED_ENV_IN_N  * LED_ENV_WINDOW_MS)
+#define BREATH_OUT_MS       (LED_ENV_OUT_N * LED_ENV_WINDOW_MS)
 
 {in_tables_cpp}
 

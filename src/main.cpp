@@ -100,9 +100,6 @@ enum BreathPhase : uint8_t
     HOLD_OUT
 };
 
-static const uint32_t BREATH_IN_MS = 4000;
-static const uint32_t BREATH_OUT_MS = 6000;
-
 volatile bool ledEnabled   = true;
 volatile bool soundEnabled = true;
 volatile BreathPhase breathPhase = BREATH_IN;
@@ -248,11 +245,11 @@ void updateLed()
     // Linear interpolation between adjacent 50 ms envelope samples.
     const uint8_t *env = (phase == BREATH_IN) ? kLedEnvelopeInProfiles[bendIdxIn]
                                                : kLedEnvelopeOutProfiles[bendIdxOut];
-    const uint8_t envN = (phase == BREATH_IN) ? 80 : 120;
+    const uint16_t envN = (phase == BREATH_IN) ? LED_ENV_IN_N : LED_ENV_OUT_N;
 
     float pos = (float)elapsed / duration * (envN - 1);
-    uint8_t lo = (uint8_t)pos;
-    uint8_t hi = (lo + 1 < envN) ? lo + 1 : lo;
+    uint16_t lo = (uint16_t)pos;
+    uint16_t hi = (lo + 1 < envN) ? lo + 1 : lo;
     float frac = pos - lo;
     float val = env[lo] + frac * (env[hi] - env[lo]);
 

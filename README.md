@@ -271,10 +271,21 @@ The LED represents "air in the lungs" and its brightness curve is derived from t
 ### Regenerating after changing the WAVs
 
 ```bash
+# 1. drop your recordings in data/ named breath_in.<ext> and breath_out.<ext>
+#    — any format (wav/mp3/m4a/flac/...), any length.
+# 2. regenerate the envelope (auto-converts to 16-bit mono 16 kHz WAV via ffmpeg)
 python3 tools/gen_led_envelope.py
+# 3. flash firmware + SPIFFS
+pio run -t upload && pio run -t uploadfs
 ```
 
-Reads `data/breath_in.wav` and `data/breath_out.wav`, writes `include/led_envelope.h` (used at build time) and `tools/envelope_viz.html` (a self-contained visualization — open it in a browser to see the volume envelope and all brightness curves overlaid). Then `pio run -t upload` to flash.
+**Filename stems matter:** the firmware opens `/breath_in.wav` and `/breath_out.wav` from SPIFFS, so your input files must be named `breath_in.*` and `breath_out.*`. The extension is free; the generator globs for them. After conversion, `data/breath_in.wav` / `data/breath_out.wav` are overwritten with the canonical version so `pio run -t uploadfs` flashes the right format.
+
+**WAV length = phase duration.** The generator derives `BREATH_IN_MS` / `BREATH_OUT_MS` and the envelope window counts (`LED_ENV_IN_N`, `LED_ENV_OUT_N`) from the total audio length and emits them as `#define`s in `include/led_envelope.h`. To change the cadence to, say, a 6 s inhale + 8 s exhale, just record files of that length — no source edits. Lengths round down to the nearest 50 ms window (e.g. 6.03 s → 120 windows = 6.00 s). Any silence before the first / after the last threshold crossing is treated as an LED hold: dark at the head of the inhale, peak at the tail, and so on.
+
+The generator also writes `tools/envelope_viz.html` — a self-contained visualization you can open in a browser to see the volume envelope and all brightness curves overlaid.
+
+**If your recording is very quiet** the generator may error with `No window crosses on-threshold …`. Lower the detection thresholds: `python3 tools/gen_led_envelope.py --on-db -45 --off-db -55`.
 
 Example output (grey line = per-window dBFS, coloured lines = LED brightness under each bend value, dashed orange/red = on/off thresholds, dashed grey verticals = active region):
 
@@ -284,7 +295,7 @@ Example output (grey line = per-window dBFS, coloured lines = LED brightness und
 
 Inhale: LED stays at 0 until the audio crosses `on_db` (~0.9 s), then rises to 255 by the last `off_db` crossing (~3.95 s). Exhale: mirror — held at 255 until the audio onset (~2.0 s), falls to 0 by the fade-out (~5.95 s). Louder `bend` values bow the curve more steeply toward the loud sections of the audio.
 
-**WAV format:** 16 kHz, 16-bit signed PCM, mono. 80 × 50 ms windows for the inhale (4.0 s), 120 × 50 ms windows for the exhale (6.0 s). These lengths are baked into `updateLed()` in `src/main.cpp`, so changing the durations requires updating `envN` there too.
+**WAV format:** 16-bit signed PCM, mono, 16 kHz — the generator will transcode other formats via ffmpeg. Current defaults: 80 × 50 ms windows inhale (4.0 s), 120 × 50 ms windows exhale (6.0 s). Window counts and phase durations are derived from the WAV lengths and emitted into `include/led_envelope.h`; firmware has no hard-coded cadence.
 
 ### How the envelope is shaped
 
@@ -314,7 +325,7 @@ The viz plots `--compare-bends` (defaults to `--profile-bends` so you see exactl
 python3 tools/gen_led_envelope.py --compare-bends "0,1,2,4,8"
 ```
 
-**Requirements:** Python 3 standard library only (`wave`, `struct`, `math`, `json`). No extra packages.
+**Requirements:** Python 3 standard library only (`wave`, `struct`, `math`, `json`). `ffmpeg` on `PATH` is required if your inputs aren't already 16-bit mono 16 kHz WAV (install via `brew install ffmpeg` on macOS).
 
 ---
 
